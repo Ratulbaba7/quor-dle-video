@@ -422,7 +422,7 @@ async def main():
 
 
 def add_background_music(video_path: str, script_dir: Path, video_dir: Path) -> Path:
-    """Add random background music to the video using ffmpeg."""
+    """Add random background music to the video using ffmpeg at normal speed."""
     # Pick a random song
     song_name = random.choice(SONGS)
     song_path = script_dir / song_name
@@ -437,53 +437,19 @@ def add_background_music(video_path: str, script_dir: Path, video_dir: Path) -> 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_path = video_dir / f"quordle_{timestamp}.mp4"
     
-    # Check video duration to ensure it is a Short (under 60s)
-    # If it's over 58s, we'll speed it up to fit.
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-            capture_output=True, text=True, timeout=10
-        )
-        duration = float(probe.stdout.strip())
-        print(f"Original duration: {duration}s")
-        
-        speed_factor = 1.0
-        if duration > 58:
-            speed_factor = duration / 58
-            print(f"Speeding up video by {speed_factor:.2f}x to fit in Shorts limit.")
-        
-        # ffmpeg command: speed up video/audio + add music
-        # vpts = 1/speed_factor
-        # atempo can only do 0.5-2.0, so we might need multiple atempo or just ignore video audio
-        vpts = 1.0 / speed_factor
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-stream_loop", "-1", "-i", str(song_path),
-            "-filter_complex", f"[0:v]setpts={vpts}*PTS[v];[1:a]volume=0.8[bg]",
-            "-map", "[v]",
-            "-map", "[bg]",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-shortest",
-            "-pix_fmt", "yuv420p",
-            str(output_path)
-        ]
-    except Exception as e:
-        print(f"Error probing duration or setting speed: {e}. Falling back to default.")
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-stream_loop", "-1", "-i", str(song_path),
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-shortest",
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-pix_fmt", "yuv420p",
-            str(output_path)
-        ]
+    # ffmpeg command: merge video + audio, loop audio, normal speed
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-stream_loop", "-1", "-i", str(song_path),
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-shortest",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-pix_fmt", "yuv420p",
+        str(output_path)
+    ]
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
