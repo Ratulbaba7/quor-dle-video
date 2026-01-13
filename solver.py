@@ -414,7 +414,7 @@ async def main():
 
 
 def add_background_music(video_path: str, script_dir: Path, video_dir: Path) -> Path:
-    """Add random background music to the video and trim first 10 seconds using ffmpeg."""
+    """Add random background music to the video using ffmpeg."""
     # Pick a random song
     song_name = random.choice(SONGS)
     song_path = script_dir / song_name
@@ -427,12 +427,11 @@ def add_background_music(video_path: str, script_dir: Path, video_dir: Path) -> 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_path = video_dir / f"quordle_{timestamp}.mp4"
     
-    print(f"Adding background music: {song_name} and trimming first 10 seconds")
+    print(f"Adding background music: {song_name}")
     
-    # ffmpeg command: trim first 10 seconds, merge video + audio, loop audio
+    # ffmpeg command: merge video + audio, loop audio
     cmd = [
         "ffmpeg", "-y",
-        "-ss", "10",  # Skip first 10 seconds
         "-i", str(video_path),
         "-stream_loop", "-1", "-i", str(song_path),
         "-c:v", "libx264",
