@@ -324,13 +324,21 @@ async def main():
         
         page = await context.new_page()
         
-        # Navigate to Quordle
+        # Set a standard User-Agent to avoid being flagged/blocked
+        await page.set_extra_http_headers({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
+        # Navigate to Quordle with longer timeout and faster wait strategy
         print("Navigating to Quordle...")
-        await page.goto("https://www.merriam-webster.com/games/quordle")
+        try:
+            await page.goto("https://www.merriam-webster.com/games/quordle", wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"Initial navigation warning: {e}. Attempting to continue...")
         
         # Wait for game to load (look for simple element)
         try:
-             await page.wait_for_selector('//*[@id="game-board-row-1"]', timeout=15000)
+             await page.wait_for_selector('//*[@id="game-board-row-1"]', timeout=30000)
         except:
              print("Timeout waiting for game board. Initializing anyway...")
 
