@@ -315,8 +315,8 @@ async def main():
         browser = await p.chromium.launch(headless=HEADLESS)
         context = await browser.new_context(
             record_video_dir=str(video_dir),
-            record_video_size={"width": 720, "height": 1280},
-            viewport={"width": 450, "height": 800}
+            record_video_size={"width": 1280, "height": 720},
+            viewport={"width": 1280, "height": 720}
         )
         
         # Enable ad blocking
