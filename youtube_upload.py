@@ -108,25 +108,32 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
         # Generate title and description if not provided
         today = datetime.now().strftime("%B %d, %Y")
         if not title:
-            title = f"Quordle {today} - Daily Puzzle Solved!"
+            title = f"Quordle {today} - Daily Solve! #Shorts #Quordle"
+        
+        # Proper SEO Description
         if not description:
-            description = f"""Watch me solve today's Quordle puzzle ({today})!
+            description = f"""Daily Quordle solve for {today}! Watch the full solution for today's puzzle. 
 
-Quordle is a word puzzle game where you guess four 5-letter words simultaneously.
+#Quordle #Wordle #DailyPuzzle #BrainTeaser #WordGame #Shorts #PuzzleSolver #WordChallenge
 
-#Quordle #WordPuzzle #DailyPuzzle #WordGame
-"""
+Quordle is a word game where you solve four 5-letter puzzles at once. Subscribe for daily solutions!"""
         
         body = {
             'snippet': {
                 'title': title,
                 'description': description,
-                'tags': ['Quordle', 'Word Puzzle', 'Daily Puzzle', 'Word Game', 'Wordle'],
-                'categoryId': '20'  # Gaming category
+                'tags': [
+                    'Quordle', 'Wordle', 'Daily Puzzle', 'Word Game', 
+                    'Brain Teaser', 'Puzzle Solution', 'Shorts', 
+                    'Daily Quordle', 'Today\'s Quordle'
+                ],
+                'categoryId': '20'  # Gaming
             },
             'status': {
                 'privacyStatus': 'public',
-                'selfDeclaredMadeForKids': False
+                'selfDeclaredMadeForKids': False,
+                'embeddable': True,
+                'license': 'youtube'
             }
         }
         
