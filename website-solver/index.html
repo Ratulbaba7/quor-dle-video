@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quordle Solver X | Premium Manual Assistant</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-blur"></div>
+    
+    <div class="container">
+        <header>
+            <h1>QUORDLE <span class="highlight">SOLVER X</span></h1>
+            <p class="subtitle">Premium Word Prediction Technology</p>
+        </header>
+
+        <main>
+            <div id="boards-grid" class="boards-grid">
+                <!-- 4 Boards will be rendered here -->
+                <div class="board" id="board-0">
+                    <div class="board-header">Board 1</div>
+                    <div class="board-content" id="board-content-0"></div>
+                </div>
+                <div class="board" id="board-1">
+                    <div class="board-header">Board 2</div>
+                    <div class="board-content" id="board-content-1"></div>
+                </div>
+                <div class="board" id="board-2">
+                    <div class="board-header">Board 3</div>
+                    <div class="board-content" id="board-content-2"></div>
+                </div>
+                <div class="board" id="board-3">
+                    <div class="board-header">Board 4</div>
+                    <div class="board-content" id="board-content-3"></div>
+                </div>
+            </div>
+
+            <section class="control-panel">
+                <div class="suggestion-box">
+                    <span class="label">Suggested Next Guess:</span>
+                    <div id="next-suggestion" class="suggestion">Calculating...</div>
+                </div>
+
+                <div class="input-section">
+                    <div class="guess-input-container">
+                        <input type="text" id="guess-input" maxlength="5" placeholder="ENTER GUESS" onkeyup="this.value = this.value.toUpperCase();">
+                        <button id="submit-btn" class="primary-btn">SUBMIT</button>
+                    </div>
+                </div>
+
+                <div class="feedback-info">
+                    <p>Type your word, then click the letters above to match Quordle's colors:</p>
+                    <div class="color-legend">
+                        <div class="legend-item"><div class="tile gray"></div> Gray (Incorrect)</div>
+                        <div class="legend-item"><div class="tile yellow"></div> Yellow (Misplaced)</div>
+                        <div class="legend-item"><div class="tile green"></div> Green (Correct)</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2026 Quordle Solver X. Enhanced Strategy.</p>
+        </footer>
+    </div>
+
+    <script src="words.js"></script>
+    <script src="solver.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
