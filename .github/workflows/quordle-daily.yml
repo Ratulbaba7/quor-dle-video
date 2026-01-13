@@ -33,7 +33,7 @@ jobs:
         env:
           HEADLESS: 'true'
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-        run: python quordleSolverPlaywright.py
+        run: python solver.py
       
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
