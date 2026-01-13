@@ -5,7 +5,7 @@ An automated Quordle solver that generates daily gameplay videos and uploads the
 ## Features
 - **Playwright-Powered**: Uses Playwright for fast, reliable browser automation.
 - **Strategic Solver**: Uses mathematical likelihoods to solve Quordle puzzles with high accuracy.
-- **Video Generation**: Automatically records gameplay and adds random background music.
+- **Video Generation**: Automatically records gameplay in high resolution and adds random background music.
 - **YouTube Integration**: Seamlessly uploads the final video to YouTube using OAuth2.
 - **GitHub Actions**: Fully automated daily runs via GitHub Actions.
 
