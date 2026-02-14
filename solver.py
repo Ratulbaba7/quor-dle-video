@@ -1049,7 +1049,7 @@ async def main():
     # Upload to YouTube
     if YOUTUBE_AVAILABLE and final_video_path:
         today = datetime.now().strftime("%B %d, %Y")
-        title = f"Quordle {today} - All Modes Solved! (Classic, Chill, Extreme, Rescue, Sequence, Weekly)"
+        title = f"Quordle answer for{today} - Quordle answer today"
         upload_to_youtube(str(final_video_path), title=title)
     else:
         print("Skipping YouTube upload.")
