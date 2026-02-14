@@ -108,13 +108,21 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
         # Generate title and description if not provided
         today = datetime.now().strftime("%B %d, %Y")
         if not title:
-            title = f"Quordle {today} - Daily Solve! #Shorts #Quordle"
+            title = f"Quordle answer for{today} - Quordle answer today #Quordle"
         
         # Proper SEO Description
         if not description:
             description = f"""Daily Quordle solve for {today}! Watch the full solution for today's puzzle. 
 
+            Quordle answer today: https://wordsolverx.com/quordle-answer-today
+
+            Quordle solver: https://wordsolverx.com/quordle-solver
+
+
+
 #Quordle #Wordle #DailyPuzzle #BrainTeaser #WordGame #Shorts #PuzzleSolver #WordChallenge
+
+Quordle answer today , quordle solver, quordle answers, how to play quordle today, quordle classic answer today, quordle chill answer today ,quordle exteme answer today, quordle sequence answer today, quordle resque answer today, quordle weekly answer , best starting word for quordle, quordle
 
 Quordle is a word game where you solve four 5-letter puzzles at once. Subscribe for daily solutions!"""
         
