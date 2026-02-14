@@ -11,15 +11,23 @@ REPO_URL = "https://github.com/wordsolverx-videos/video.git"
 TARGET_DIR = "quordle"
 
 def run_command(command, cwd=None):
+    print(f"DEBUG: Executing '{command}' in '{cwd}'")
     try:
         # Use shell=True for windows compatibility and easier command chaining
         result = subprocess.run(
-            command, cwd=cwd, shell=True, check=True, text=True, capture_output=True
+            command, cwd=cwd, shell=True, text=True, capture_output=True
         )
-        print(f"Success: {command}")
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error running {command}: {e.stderr}")
+        if result.returncode == 0:
+            print(f"Success: {command}")
+            # print(result.stdout) # Optional: too noisy?
+            return result.stdout.strip()
+        else:
+            print(f"ERROR: Command '{command}' failed with return code {result.returncode}")
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            return None
+    except Exception as e:
+        print(f"EXCEPTION running {command}: {e}")
         return None
 
 def update_video_repo(video_id):
