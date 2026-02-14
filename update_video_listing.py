@@ -19,16 +19,15 @@ def run_command(command, cwd=None):
         )
         if result.returncode == 0:
             print(f"Success: {command}")
-            # print(result.stdout) # Optional: too noisy?
-            return result.stdout.strip()
+            return True
         else:
             print(f"ERROR: Command '{command}' failed with return code {result.returncode}")
             print("STDOUT:", result.stdout)
             print("STDERR:", result.stderr)
-            return None
+            return False
     except Exception as e:
         print(f"EXCEPTION running {command}: {e}")
-        return None
+        return False
 
 def update_video_repo(video_id):
     # 1. Setup Authentication URL
