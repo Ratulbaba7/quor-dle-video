@@ -1054,17 +1054,32 @@ async def main():
         
         if video_id:
             # Trigger repository update
-            print("Updating Video Repository Listing...")
+            print(f"Updating Video Repository Listing for ID: {video_id}...")
             try:
                 # The script is now in the SAME folder as solver.py
                 script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_video_listing.py")
                 if os.path.exists(script_path):
-                     subprocess.run(["python", script_path, video_id], check=True)
-                     print("Repository listing updated successfully!")
+                     # Capture output to ensure we see it in CI logs
+                     result = subprocess.run(
+                        ["python", script_path, video_id], 
+                        check=False, 
+                        capture_output=True, 
+                        text=True
+                     )
+                     print("--- Update Script Output ---")
+                     print(result.stdout)
+                     print("--- Update Script Errors ---")
+                     print(result.stderr)
+                     print("----------------------------")
+                     
+                     if result.returncode == 0:
+                        print("Repository listing updated successfully!")
+                     else:
+                        print(f"Update script failed with code {result.returncode}")
                 else:
                     print(f"Warning: Update script not found at {script_path}")
             except Exception as e:
-                print(f"Failed to update repository listing: {e}")
+                print(f"Failed to execute update script: {e}")
                 
     else:
         print("Skipping YouTube upload.")

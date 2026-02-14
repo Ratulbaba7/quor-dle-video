@@ -106,9 +106,13 @@ def update_video_repo(video_id):
         sys.stdout.flush()
 
 if __name__ == "__main__":
+    print("DEBUG: update_video_listing.py started...")
+    sys.stdout.flush()
+    
     if len(sys.argv) < 2:
         print("Usage: python update_video_listing.py <video_id>")
         sys.exit(1)
     
     video_id = sys.argv[1]
+    print(f"DEBUG: Received video_id: {video_id}")
     update_video_repo(video_id)
