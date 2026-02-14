@@ -67,8 +67,7 @@ def update_video_repo(video_id):
         data = {
             "id": video_id,
             "date": today,
-            "platform": "youtube",
-            "type": "daily-solve"
+            "url": f"https://www.youtube.com/watch?v={video_id}"
         }
         
         # Write file
