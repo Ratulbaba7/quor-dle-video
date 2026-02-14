@@ -1,8 +1,10 @@
 # Quordle Video Automation
 
-An automated Quordle solver that generates daily gameplay videos and uploads them to YouTube.
+An automated Quordle solver that plays **all 5 game modes** (Classic, Chill, Extreme, Rescue, Sequence) and generates a single daily gameplay video for YouTube.
 
 ## Features
+- **All Game Modes**: Solves Classic, Chill, Extreme, Rescue, and Sequence modes in a single video.
+- **Transition Screens**: Displays stylish transition screens with mode names between games.
 - **Playwright-Powered**: Uses Playwright for fast, reliable browser automation.
 - **Strategic Solver**: Uses mathematical likelihoods to solve Quordle puzzles with high accuracy.
 - **Video Generation**: Automatically records gameplay in high resolution and adds random background music.
