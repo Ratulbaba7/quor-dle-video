@@ -35,7 +35,7 @@ def update_video_repo(video_id):
     pat = os.environ.get("VIDEO_REPO_PAT")
     if not pat:
         print("ERROR: VIDEO_REPO_PAT environment variable not found.")
-        print("Please add the PAT as a secret in GitHub Actions.")
+        sys.stdout.flush()
         return
 
     auth_url = REPO_URL.replace("https://", f"https://{pat}@")
@@ -45,8 +45,12 @@ def update_video_repo(video_id):
         repo_path = os.path.join(temp_dir, "video-repo")
         
         # 3. Clone the repo
-        print(f"Cloning repo to temporary directory...")
+        print(f"DEBUG: Cloning to {repo_path}...")
+        sys.stdout.flush()
+        
+        # Clone heavily, ensure we get main branch
         if not run_command(f"git clone {auth_url} {repo_path}"):
+            print("ERROR: Clone failed")
             return
             
         # 4. Create/Verify Target Directory
@@ -54,6 +58,8 @@ def update_video_repo(video_id):
         if not os.path.exists(target_path):
             os.makedirs(target_path)
             
+        print(f"DEBUG: Target path is {target_path}")
+
         # 5. Create JSON File
         today = datetime.now().strftime("%Y-%m-%d")
         json_filename = f"{today}.json"
@@ -66,27 +72,38 @@ def update_video_repo(video_id):
             "type": "daily-solve"
         }
         
-        with open(json_path, "w") as f:
-            json.dump(data, f, indent=2)
+        # Write file
+        try:
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"DEBUG: Wrote JSON to {json_path}")
+        except Exception as e:
+            print(f"ERROR: Failed to write JSON: {e}")
+            return
             
-        print(f"Created {json_filename} with video ID: {video_id}")
-        
         # 6. Git Config (Needed for CI)
         run_command('git config user.name "Wordsolver Robot"', cwd=repo_path)
         run_command('git config user.email "robot@wordsolverx.com"', cwd=repo_path)
         
         # 7. Commit and Push
-        print("Committing and pushing changes...")
+        print("DEBUG: Staging changes...")
         run_command("git add .", cwd=repo_path)
-        # Check if there are actually changes to commit
-        status = run_command("git status --porcelain", cwd=repo_path)
-        if not status:
-            print("No changes to commit (file already exists and is identical).")
-            return
+        
+        print("DEBUG: Committing...")
+        # Force commit even if empty just to see what happens (allow-empty is for debug)
+        commit_msg = f"Add Quordle video for {today}"
+        if run_command(f'git commit -m "{commit_msg}"', cwd=repo_path):
+            print("DEBUG: Pushing to origin main...")
+            # Explicitly force push to main to avoid detached head issues
+            push_result = run_command("git push origin main", cwd=repo_path)
+            if push_result is not None:
+                print("SUCCESS: Pushed to wordsolverx-videos/video")
+            else:
+                print("ERROR: Push failed")
+        else:
+            print("ERROR: Commit failed (nothing to commit?)")
             
-        if run_command(f'git commit -m "Add Quordle video for {today}"', cwd=repo_path):
-            run_command("git push origin main", cwd=repo_path)
-            print("Successfully pushed to wordsolverx-videos/video!")
+        sys.stdout.flush()
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
