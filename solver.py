@@ -1054,17 +1054,17 @@ async def main():
         
         if video_id:
             # Trigger repository update
-            print("Updating Video Repository...")
+            print("Updating Video Repository Listing...")
             try:
-                # Path to update script: ../wordsolver-video/update_repo.py relative to current dir
-                script_path = os.path.join(os.path.dirname(os.getcwd()), "wordsolver-video", "update_repo.py")
+                # The script is now in the SAME folder as solver.py
+                script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_video_listing.py")
                 if os.path.exists(script_path):
                      subprocess.run(["python", script_path, video_id], check=True)
-                     print("Repository updated successfully!")
+                     print("Repository listing updated successfully!")
                 else:
                     print(f"Warning: Update script not found at {script_path}")
             except Exception as e:
-                print(f"Failed to update repository: {e}")
+                print(f"Failed to update repository listing: {e}")
                 
     else:
         print("Skipping YouTube upload.")
