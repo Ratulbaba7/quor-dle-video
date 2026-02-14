@@ -33,6 +33,7 @@ jobs:
         env:
           HEADLESS: 'true'
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          VIDEO_REPO_PAT: ${{ secrets.VIDEO_REPO_PAT }}
         run: python solver.py
       
       - name: Upload video artifact
