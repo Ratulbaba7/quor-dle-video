@@ -1050,7 +1050,22 @@ async def main():
     if YOUTUBE_AVAILABLE and final_video_path:
         today = datetime.now().strftime("%B %d, %Y")
         title = f"Quordle answer for{today} - Quordle answer today"
-        upload_to_youtube(str(final_video_path), title=title)
+        video_id = upload_to_youtube(str(final_video_path), title=title)
+        
+        if video_id:
+            # Trigger repository update
+            print("Updating Video Repository...")
+            try:
+                # Path to update script: ../wordsolver-video/update_repo.py relative to current dir
+                script_path = os.path.join(os.path.dirname(os.getcwd()), "wordsolver-video", "update_repo.py")
+                if os.path.exists(script_path):
+                     subprocess.run(["python", script_path, video_id], check=True)
+                     print("Repository updated successfully!")
+                else:
+                    print(f"Warning: Update script not found at {script_path}")
+            except Exception as e:
+                print(f"Failed to update repository: {e}")
+                
     else:
         print("Skipping YouTube upload.")
     
