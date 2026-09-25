@@ -7,6 +7,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 import re
 import json
+import requests
 import wordListsMethods
 
 # Import YouTube upload (optional - graceful if missing)
@@ -44,6 +45,7 @@ lettersUsed = [1] * 26
 avgLikelihoods = wordListsMethods.totalLetterLikelihoods(wordListsMethods.getLetterLikelihoods(allWords))
 knowledgeList = [[""] * 5 for _ in range(4)]
 resultsList = [[""] * 5 for _ in range(4)]
+_last_row = {}
 
 # Helper Functions
 
@@ -237,7 +239,7 @@ def removeWords():
 
 def reset_solver_state():
     """Reset all solver state variables for a new game mode."""
-    global indivWords, resultsList, knowledgeList, lettersUsed, iteration, guessWord, lastWordGuessedFromList
+    global indivWords, resultsList, knowledgeList, lettersUsed, iteration, guessWord, lastWordGuessedFromList, _last_row
     indivWords = [wordListsMethods.getAllWords(), wordListsMethods.getAllWords(), wordListsMethods.getAllWords(), wordListsMethods.getAllWords()]
     resultsList = [["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""]]
     knowledgeList = [["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""]]
@@ -245,233 +247,310 @@ def reset_solver_state():
     iteration = -1
     guessWord = ""
     lastWordGuessedFromList = -1
+    _last_row = {}
 
 # Async functions for Playwright
 
-async def get_square_color(page, i_idx, j_idx, row_idx, k_idx):
-    xpath = f'//*[@id="game-board-row-{i_idx}"]/div[{j_idx}]/div[{row_idx}]/div[{k_idx}]'
-    try:
-        color = await page.locator(xpath).evaluate("e => getComputedStyle(e).backgroundColor")
-        print(f"DEBUG: {xpath} -> {color}")
-        return color
-    except Exception as e:
-        # print(f"Error getting color for {xpath}: {e}")
-        return "rgba(0, 0, 0, 0)"
+# ---------------------------------------------------------------- board reading
+# New MW markup (Sep 2026): div[aria-label="Game Board N"] > .quordle-guess-row
+# (5x .quordle-box). Tile aria-label verbs: "is correct" (C, bg-box-correct),
+# "is in a different spot" (M, bg-box-diff), "is incorrect" (I, bg-zinc-200),
+# "being guessed"/"a future guess"/"invalid guess" (not submitted yet).
+# All reads go through page.evaluate — locator.count()/is_visible() are
+# unreliable here.
 
-async def get_square_letter(page, i_idx, j_idx, row_idx, k_idx):
-    """Get the letter inside a specific square."""
-    xpath = f'//*[@id="game-board-row-{i_idx}"]/div[{j_idx}]/div[{row_idx}]/div[{k_idx}]'
+async def _safe_eval(page, js, default=None):
     try:
-        # Try getting text content directly or from aria-label
-        letter = await page.locator(xpath).inner_text()
-        return letter.strip().upper()
-    except Exception as e:
-        return ""
+        return await page.evaluate(js)
+    except Exception:
+        return default
 
-async def sync_sequence_board_state(page, active_board_idx):
+
+def _aria_state(aria):
+    aria = aria or ""
+    if "different spot" in aria:
+        return "M"
+    if "incorrect" in aria:
+        return "I"
+    if "correct" in aria:
+        return "C"
+    return None
+
+
+READ_ROW_JS = """(payload) => {
+    const boards = document.querySelectorAll('div[aria-label="Game Board ' + payload.board + '"]');
+    if (!boards.length) return null;
+    const rows = boards[0].querySelectorAll('.quordle-guess-row');
+    if (payload.row >= rows.length) return null;
+    const tiles = rows[payload.row].querySelectorAll('.quordle-box');
+    const out = [];
+    tiles.forEach(t => out.push({
+        letter: (t.innerText || '').trim().toUpperCase(),
+        aria: t.getAttribute('aria-label') || ''
+    }));
+    return out;
+}"""
+
+
+async def read_board_row(page, board_idx, row_idx):
+    """Return (word, [C/M/I...]) for a board row; unsubmitted tiles -> (word, None)."""
+    try:
+        tiles = await page.evaluate(READ_ROW_JS, {"board": board_idx + 1, "row": row_idx})
+    except Exception:
+        return None, None
+    if not tiles or len(tiles) != 5:
+        return None, None
+    word = "".join(t.get("letter", "") for t in tiles)
+    if len(word) != 5:
+        return None, None
+    states = [_aria_state(t.get("aria", "")) for t in tiles]
+    if any(s is None for s in states):
+        return word, None
+    return word, states
+
+
+async def read_latest_row(page, board_idx, max_rows=12):
+    """Latest submitted row for a board: (row_idx, word, states) or (None...)."""
+    start = _last_row.get(board_idx, 0)
+    found = None
+    for r in range(start, max_rows):
+        word, states = await read_board_row(page, board_idx, r)
+        if word and states:
+            found = (r, word, states)
+            _last_row[board_idx] = r
+        elif word and not states:
+            break
+    if found:
+        return found
+    # fall back to full scan (board may have reset underneath us)
+    _last_row[board_idx] = 0
+    for r in range(max_rows):
+        word, states = await read_board_row(page, board_idx, r)
+        if word and states:
+            found = (r, word, states)
+            _last_row[board_idx] = r
+        elif word and not states:
+            break
+    if found:
+        return found
+    return None, None, None
+
+
+async def wait_for_game(page, timeout_s=45):
+    """Wait until the board is mounted (keys + at least one guess row)."""
+    for _ in range(int(timeout_s * 2)):
+        n = await _safe_eval(page, "() => document.querySelectorAll('.quordle-key').length", 0) or 0
+        rows = await _safe_eval(page, "() => document.querySelectorAll('.quordle-guess-row').length", 0) or 0
+        if n >= 20 and rows > 0:
+            return True
+        await page.wait_for_timeout(500)
+    return False
+
+
+async def dismiss_welcome(page):
+    """Close a welcome / instructions dialog if one is up."""
+    clicked = await _safe_eval(
+        page,
+        """() => {
+            const dlg = document.querySelector('[role="dialog"]');
+            if (!dlg) return 'none';
+            const btns = Array.from(dlg.querySelectorAll('button,a'));
+            const want = btns.find(b => /got it|play|start|continue|close|let.s go/i.test(b.innerText || ''));
+            (want || btns[0] || {click:()=>{}}).click();
+            return want ? 'clicked:' + (want.innerText || '').slice(0, 20) : (btns.length ? 'clicked-first' : 'no-btn');
+        }""",
+        "eval-fail",
+    )
+    print(f"[quordle] welcome overlay: {clicked}")
+    await page.wait_for_timeout(1500)
+
+
+async def probe_live(page, timeout_s=60):
+    """Type/clear a letter to prove the board accepts input. Returns bool.
+
+    Reads the whole Board 1 text before/after (Rescue starts on later
+    rows, so row 0 alone is not a valid probe target).
+    """
+    board_text_js = """() => { const b = document.querySelector('div[aria-label="Game Board 1"]'); return b ? b.innerText : ''; }"""
+    for _ in range(int(timeout_s / 4)):
+        try:
+            before = await _safe_eval(page, board_text_js, "")
+            await page.keyboard.type("q", delay=60)
+            await page.wait_for_timeout(1200)
+            after = await _safe_eval(page, board_text_js, "")
+            await page.keyboard.press("Backspace")
+            await page.wait_for_timeout(800)
+            if after and after != (before or "") and "Q" in after.upper():
+                # confirm the probe letter is fully cleared (else it would
+                # corrupt the first real guess); retry Backspace a few times.
+                for _ in range(3):
+                    cur = await _safe_eval(page, board_text_js, "")
+                    if cur == (before or ""):
+                        break
+                    await page.keyboard.press("Backspace")
+                    await page.wait_for_timeout(500)
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+    return False
+
+
+async def sync_sequence_board_state(page, active_board_idx, max_rows=10):
     """
     Called when Sequence mode moves to a new board (e.g. 1 -> 2).
-    We must re-read all previous guesses (lines 1 to iteration)
-    and update the `indivWords` for THIS board using its revealed colors.
+    Re-read all previous guesses and update state for THIS board using its
+    revealed aria-label states.
     """
-    global iteration, guessWord, resultsList
-    
-    print(f"Syncing state for Board {active_board_idx+1} (History Catch-up)...")
-    
-    # Map active_board_idx (0..3) to sequence coordinates (1..2, 1..2)
-    # 0->(1,1), 1->(1,2), 2->(2,1), 3->(2,2)
-    coords = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    i_idx, j_idx = coords[active_board_idx]
-    
-    # `iteration` is 0-indexed count of guesses made so far.
-    # So we have rows 1 to `iteration+1` filled.
-    # Actually `iteration` increments AFTER a guess.
-    # If we just finished guess 5 (iteration=5), we want to read rows 1..5?
-    # No, iteration starts at -1. After 1 guess, iteration=0.
-    # So we read rows 1 to `iteration + 1`.
-    
-    saved_guess_word = guessWord # Backup
-    
-    for row in range(1, iteration + 2):
-        # 1. Get the word guessed in this row (from Board 1, as all are same)
-        current_word = ""
-        for k in range(1, 6):
-            l = await get_square_letter(page, 1, 1, row, k)
-            current_word += l
-        
-        if len(current_word) != 5:
-             # Should not happen unless sync issue
+    global iteration, guessWord, resultsList, knowledgeList
+
+    print(f"Syncing state for Board {active_board_idx + 1} (History Catch-up)...")
+    saved_guess_word = guessWord  # Backup
+    for row in range(0, iteration + 1):
+        word, states = await read_board_row(page, active_board_idx, row)
+        if not word or not states:
             continue
-
-        guessWord = current_word
-        
-        # 2. Get colors for the ACTIVE board at this row
-        # We manually update resultsList[active_board_idx]
-        for k in range(1, 6):
-            color = await get_square_color(page, i_idx, j_idx, row, k)
-            
-            if "0, 204, 136" in color:
-                resultsList[active_board_idx][k-1] = "C"
-            elif "255, 204, 0" in color:
-                resultsList[active_board_idx][k-1] = "M"
-            elif "228, 228, 231" in color or "206, 213, 222" in color or "205, 213, 223" in color:
-                resultsList[active_board_idx][k-1] = "I"
-            else:
-                # Treat others as I or ignore?
-                # If sequence mode hidden previously, it might be gray now?
-                # No, now it should be colored.
-                resultsList[active_board_idx][k-1] = "I" # Assume incorrect if not green/yellow
-
-        # 3. Apply filter
-        # We only want to affect `indivWords[active_board_idx]`.
-        # `removeWords()` affects ALL boards based on `resultsList`.
-        # To be safe, we should ONLY touch `indivWords[active_board_idx]`.
-        # But `removeWords` is hardcoded to loop 0..3.
-        # However, `resultsList` for other boards should rely on their CURRENT state.
-        # But we haven't updated `resultsList` for *other* boards for this *past* row.
-        # Actually `resultsList` stores the *latest* feedback.
-        # If we run `removeWords` now with `guessWord="PAST_GUESS"`, 
-        # it will check `resultsList` for ALL boards.
-        # `resultsList` for Board 0 is likely "Green/Solved" (since we passed it).
-        # `resultsList` for Board 2/3 is empty/inactive.
-        # So `removeWords` should naturally skip them (due to our Fix #1).
-        # So it IS safe to run `removeWords` globally!
+        guessWord = word
+        resultsList[active_board_idx] = list(states)
+        for k, s in enumerate(states):
+            if s == "C":
+                knowledgeList[active_board_idx][k] = "D"
         removeWords()
-        
-    guessWord = saved_guess_word # Restore
-    print(f"Board {active_board_idx+1} synced. Candidates left: {len(indivWords[active_board_idx])}")
+    guessWord = saved_guess_word  # Restore
+    print(f"Board {active_board_idx + 1} synced. Candidates left: {len(indivWords[active_board_idx])}")
 
-async def sync_board_state(page):
+
+async def sync_board_state(page, max_rows=12):
     """
-    Scans the board for any pre-filled moves (like in Rescue mode).
-    Updates the solver's internal state (indivWords, resultsList) to match the board.
+    Replay any pre-filled rows (like in Rescue mode) into solver state,
+    reading the current markup via aria-label.
+
+    Rescue mode starts with several pre-filled guess rows: the SAME physical
+    guess appears on all 4 boards, each board showing its own per-board
+    feedback colors. Every pre-filled row must be applied per-board at the
+    SAME row index. Previously this called changeResultsListAsync (which reads
+    the LATEST submitted row per board), so while replaying row r it applied
+    feedback from a different row -> word/feedback mismatch -> removeWords()
+    pruned every candidate. We now inline a per-board, per-row read instead.
     """
-    global iteration, guessWord, resultsList
-    
+    global iteration, guessWord, resultsList, knowledgeList
+
     print("Syncing board state...")
-    
-    # We check rows 1 through 9. If a row has letters, we process it.
-    # In Rescue mode, usually rows 1 and 2 are filled.
-    
     found_prefilled = False
-    
-    for row in range(1, 10):
-        # Check if the first square of the first board has a letter
-        # We check board 1 (i=1, j=1)
-        first_letter = await get_square_letter(page, 1, 1, row, 1)
-        
-        if not first_letter:
-            # If no letter, we've reached the empty part of the board
-            # So the *previous* row was the last filled one
-            iteration = row - 2 # 0-indexed iteration
+    for row in range(max_rows):
+        # Use board 0 to detect end-of-prefill and get the row's guess word.
+        b0_word, b0_states = await read_board_row(page, 0, row)
+
+        # Determine the guess word for this row. Prefer board 0; if board 0
+        # row r is unreadable, fall back to any board that returns 5 letters.
+        row_word = b0_word if (b0_word and len(b0_word) == 5) else None
+        if row_word is None:
+            for b in range(1, 4):
+                w, _ = await read_board_row(page, b, row)
+                if w and len(w) == 5:
+                    row_word = w
+                    break
+
+        # No word on any board for this row -> end of the pre-filled section.
+        if not row_word:
+            iteration = row - 1
             break
-            
-        print(f"Detected pre-filled row {row}: reading inputs...")
+
+        # A row with a word but NO revealed states anywhere is the current
+        # (unsubmitted) row; do not replay it.
+        row_has_states = bool(b0_states)
+        if not row_has_states:
+            for b in range(1, 4):
+                _, s = await read_board_row(page, b, row)
+                if s:
+                    row_has_states = True
+                    break
+        if not row_has_states:
+            iteration = row - 1
+            break
+
+        print(f"Detected pre-filled row {row + 1}: {row_word}")
         found_prefilled = True
-        
-        # Construct the word from the first board (since all boards get same input)
-        # Note: In Rescue, all boards have the same word guessed
-        current_word = ""
-        for k in range(1, 6):
-            l = await get_square_letter(page, 1, 1, row, k)
-            current_word += l
-            
-        print(f"Pre-filled word: {current_word}")
-        guessWord = current_word
-        
-        # Now update state via changeResultsListAsync logic
-        # We need to set the global iteration to match this row for changeResultsListAsync to work
-        iteration = row - 1
-        
-        # Read colors for this row
-        await changeResultsListAsync(page)
-        
-        # Apply solver logic
+
+        # Apply this row's feedback per-board at the SAME row index. Read row r
+        # on every board; only overwrite resultsList[b] when that board returns
+        # valid states, otherwise leave its existing resultsList untouched.
+        for b in range(4):
+            word_b, states_b = await read_board_row(page, b, row)
+            # Guard against desync/garbage: skip a board whose row is
+            # unreadable or has bad length rather than corrupting state.
+            if not states_b:
+                continue
+            if not word_b or len(word_b) != 5 or len(states_b) != 5:
+                continue
+            resultsList[b] = list(states_b)
+            for k, s in enumerate(states_b):
+                if s == "C":
+                    knowledgeList[b][k] = "D"
+
+        guessWord = row_word
+        iteration = row
         setLettersAsUsed(guessWord)
         removeWords()
-        
+
     if found_prefilled:
         print(f"Board sync complete. Resuming at iteration {iteration + 1}")
     else:
         print("No pre-filled rows detected.")
 
 
-async def get_solved_words(page):
+async def get_solved_words(page, max_rows=12):
     """
-    Scans the 4 boards to find the solved (Green) words.
+    Scan the 4 boards to find the solved (all-correct) words.
     Returns a list of 4 words.
     """
     solved_words = []
-    
-    # Boards are arranged in a 2x2 grid logic (i=1..2, j=1..2)
-    # But usually we just iterate 0..3 for our internal list.
-    # We need to map linear index 0..3 to (row_group, col_group)
-    # Board 0: i=1, j=1
-    # Board 1: i=1, j=2
-    # Board 2: i=2, j=1
-    # Board 3: i=2, j=2
-    
-    board_coords = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    
-    for b_idx, (i, j) in enumerate(board_coords):
+    for b in range(4):
         word_found = "UNKNOWN"
-        
-        # Scan all rows (1-9) for this board to find the Green one
-        for r in range(1, 10):
-            # Check color of first letter
-            color = await get_square_color(page, i, j, r, 1)
-            
-            # If Green
-            if "0, 204, 136" in color:
-                # This is the winning row! Extract the word.
-                w = ""
-                for k in range(1, 6):
-                    l = await get_square_letter(page, i, j, r, k)
-                    w += l
-                word_found = w
+        for r in range(max_rows):
+            word, states = await read_board_row(page, b, r)
+            if word and states == ["C", "C", "C", "C", "C"]:
+                word_found = word
                 break
-        
         solved_words.append(word_found)
-        
     return solved_words
 
-async def changeResultsListAsync(page, active_board_idx=None):
-    global resultsList
-    global knowledgeList
-    global iteration
-    
-    current_xpath_row = iteration + 1
-    
-    board_idx = 0
-    for i in range(1, 3):
-        for j in range(1, 3):
-            # If in Sequence mode, SKIP boards that are not the active one
-            if active_board_idx is not None and board_idx != active_board_idx:
-                board_idx += 1
-                continue
 
-            for k in range(1, 6):
-                color = await get_square_color(page, i, j, current_xpath_row, k)
-                
-                if "0, 204, 136" in color:  # Green
-                    resultsList[board_idx][k-1] = "C"
-                    knowledgeList[board_idx][k-1] = "D"
-                elif "255, 204, 0" in color:  # Yellow
-                    resultsList[board_idx][k-1] = "M"
-                elif "228, 228, 231" in color:  # Gray (incorrect)
-                    resultsList[board_idx][k-1] = "I"
-                elif "212, 212, 216" in color:  # Gray variant (Rescue mode)
-                    resultsList[board_idx][k-1] = "I"
-                elif "226, 232, 240" in color:  # Gray variant (Sequence/inactive board)
-                    pass  # Inactive board, skip
-                elif "244, 244, 245" in color:  # Already solved
-                    pass
-                elif "206, 213, 222" in color or "205, 213, 223" in color or "204, 213, 224" in color or "203, 213, 225" in color:  # Gray variants
-                    resultsList[board_idx][k-1] = "I"
-                else:
-                    # In Rescue/Sequence mode, undefined colors might appear for hidden boards.
-                    pass
-            board_idx += 1
+async def changeResultsListAsync(page, active_board_idx=None, max_rows=12):
+    global resultsList, knowledgeList, iteration
+    targets = range(4) if active_board_idx is None else [active_board_idx]
+    for board_idx in targets:
+        _, word, states = await read_latest_row(page, board_idx, max_rows)
+        if not word or not states:
+            continue
+        resultsList[board_idx] = list(states)
+        for k, s in enumerate(states):
+            if s == "C":
+                knowledgeList[board_idx][k] = "D"
+
+
+async def resync_results_from_dom(page, max_rows=12):
+    """
+    Rebuild resultsList/knowledgeList from the latest submitted row on every
+    board by re-reading the DOM. Used as a recovery step when the solver gets
+    stuck (empty candidate list) so a single bad prune does not instantly lose.
+
+    Forces a full re-scan (clears the _last_row cache) and guards against
+    desync: a board whose latest row is unreadable or malformed is skipped
+    rather than corrupting state.
+    """
+    global resultsList, knowledgeList, _last_row
+    _last_row = {}
+    for board_idx in range(4):
+        _, word, states = await read_latest_row(page, board_idx, max_rows)
+        if not word or not states:
+            continue
+        if len(word) != 5 or len(states) != 5:
+            continue
+        resultsList[board_idx] = list(states)
+        for k, s in enumerate(states):
+            if s == "C":
+                knowledgeList[board_idx][k] = "D"
 
 async def block_ads(route):
     url = route.request.url
@@ -482,28 +561,25 @@ async def block_ads(route):
 
 async def dismiss_popups(page):
     """Dismiss any popups that may appear (close buttons, modals, etc.)."""
-    # Try to close the modal popup with X button
-    close_selectors = [
-        'button[aria-label="Close"]',
-        'button:has(svg path[d*="M6 18L18 6"])',
-        '.bg-white.rounded-full button',
-        'button:has(title:text("Close"))',
-    ]
-    
-    for selector in close_selectors:
-        try:
-            close_btn = page.locator(selector).first
-            if await close_btn.is_visible(timeout=2000):
-                print(f"Found popup close button: {selector}")
-                await close_btn.click()
-                await asyncio.sleep(1)
-                print("Popup closed")
-                break
-        except:
-            pass
-    
+    found = await _safe_eval(
+        page,
+        """() => {
+            const sels = ['button[aria-label="Close"]', '.bg-white.rounded-full button'];
+            for (const s of sels) {
+                const el = document.querySelector(s);
+                if (el && el.getBoundingClientRect().width > 0) { el.click(); return s; }
+            }
+            return null;
+        }""",
+    )
+    if found:
+        print(f"Popup closed: {found}")
+        await page.wait_for_timeout(1000)
     # Also click outside to dismiss any overlays
-    await page.mouse.click(10, 10)
+    try:
+        await page.mouse.click(10, 10)
+    except Exception:
+        pass
     await asyncio.sleep(0.5)
 
 async def show_transition_screen(page, mode_name):
@@ -590,23 +666,20 @@ async def show_transition_screen(page, mode_name):
 
 async def check_game_over(page):
     """Check if the game has ended (win or loss message visible)."""
-    game_over_selectors = [
-        'text="So close!"',
-        'text="Nice work!"',
-        'text="Brilliant!"',
-        'text="Genius!"',
-        'text="Impressive!"',
-        'text="Great!"',
-        'text="Phew!"',
-    ]
-    
-    for selector in game_over_selectors:
-        try:
-            if await page.locator(selector).is_visible(timeout=500):
-                return True
-        except:
-            pass
-    return False
+    phrases = ["So close!", "Nice work!", "Brilliant!", "Genius!", "Impressive!", "Great!", "Phew!", "Congrats!"]
+    text = await _safe_eval(page, "() => document.body.innerText", "") or ""
+    if any(p in text for p in phrases):
+        return True
+    # end screens sometimes render in a dialog that innerText windows miss
+    dlg = await _safe_eval(
+        page,
+        """() => {
+            const d = document.querySelector('[role="dialog"]');
+            return d ? d.innerText.slice(0, 500) : '';
+        }""",
+        "",
+    ) or ""
+    return any(p in dlg for p in phrases)
 
 # ----- FALLBACK LOGIC -----
 
@@ -795,8 +868,85 @@ async def show_victory_screen(page, mode_name, solved_words):
     ''')
 
 
-async def play_single_mode(page, mode_name):
-    """Play a single Quordle game mode."""
+# ---------------------------------------------------------------- official answers
+# Wordle-style guarantee: we publish the correct daily answers on our own site,
+# so after one organic show-guess we can green each board deterministically.
+# The site data is SvelteKit devalue-encoded; resolve_devalue turns the
+# index-addressed __data.json payload back into plain values.
+
+OFFICIAL_MODE_KEY = {
+    "Classic": "d", "Chill": "c", "Extreme": "e",
+    "Sequence": "s", "Rescue": "r", "Weekly": "w",
+}
+
+_official_cache = {}
+
+
+def resolve_devalue(data):
+    """Resolve SvelteKit __data.json index references into plain values."""
+    def _res(x):
+        if isinstance(x, int) and 0 <= x < len(data):
+            return _res(data[x])
+        if isinstance(x, list):
+            return [_res(v) for v in x]
+        if isinstance(x, dict):
+            return {k: _res(v) for k, v in x.items()}
+        return x
+    return _res(data)
+
+
+def fetch_official_quordle():
+    """Official daily answers from our own site (same data the pages show).
+
+    Returns (dateKey, {modeName: [4 words]}). Cached per process. On any
+    failure returns (None, {}) so the solver still runs (pure-solver fallback).
+    Practice has no official answers (random boards) -> omitted.
+    """
+    if "data" in _official_cache:
+        return _official_cache["data"]
+    try:
+        r = requests.get(
+            "https://wordsolverx.com/quordle-answer-today/__data.json",
+            timeout=20,
+            headers={"User-Agent": "WordSolverX Video", "Accept": "application/json"},
+        )
+        r.raise_for_status()
+        payload = r.json()
+        today_data = None
+        date_key = None
+        for node in payload.get("nodes", []):
+            if not isinstance(node, dict) or node.get("type") != "data":
+                continue
+            resolved = resolve_devalue(node["data"])
+            root = resolved[0] if isinstance(resolved, list) and resolved else resolved
+            if isinstance(root, dict) and isinstance(root.get("todayData"), dict):
+                today_data = root["todayData"]
+                date_key = root.get("dateKey")
+                break
+        if not today_data:
+            print("[official] todayData not found in __data.json")
+            return None, {}
+        out = {}
+        for mode, key in OFFICIAL_MODE_KEY.items():
+            words = [str(w).upper() for w in (today_data.get(key) or [])]
+            if len(words) == 4 and all(len(w) == 5 for w in words):
+                out[mode] = words
+        print(f"[official] {date_key}: " + ", ".join(f"{m}={','.join(w)}" for m, w in out.items()))
+        _official_cache["data"] = (date_key, out)
+        return date_key, out
+    except Exception as e:
+        print(f"[official] fetch failed (solver fallback): {e}")
+        return None, {}
+
+
+async def play_single_mode(page, mode_name, official=None):
+    """Play a single Quordle game mode.
+
+    If `official` (the 4 daily answers for this mode) is provided, the solver
+    plays one organic show-guess and then greens each board with the official
+    answers (Wordle-style guarantee). A drift check hands control back to the
+    pure solver if the site data is out of sync with the live board.
+    """
     global guessWord
     global lastWordGuessedFromList
     global iteration
@@ -828,6 +978,21 @@ async def play_single_mode(page, mode_name):
     
     solved_words_final = []
     
+    # Guided answers (Wordle-style guarantee): keep the FIRST organic guess so
+    # the video shows real solving, then guess the official answer for the first
+    # currently-unsolved board (board order = solve order, incl. Sequence).
+    # Disabled on drift (solver takes over). Practice/Weekly or any mode with no
+    # official entry -> guided stays off -> pure solver path (unchanged).
+    guided = [(w or "").upper() for w in (official or []) if w]
+    guided = [w for w in guided if len(w) == 5]
+    guided_ok = len(guided) == 4
+    used = set()
+    guided_target = None
+    if guided_ok:
+        print(f"[{mode_name}] guided answers: {','.join(guided)}")
+    
+    last_active_board_idx = 0
+    
     for i in range(start_guess, max_guesses):
         # Check if game already ended
         if await check_game_over(page):
@@ -851,11 +1016,6 @@ async def play_single_mode(page, mode_name):
             if current_board_index > 3:
                 current_board_index = 3 # Cap at 3 purely for safety, though we likely broke out already
 
-            # Check if we switched boards implies we need to Resync history for new board
-            # We track `last_active_board_idx` (need to init it outside loop)
-            if 'last_active_board_idx' not in locals():
-                last_active_board_idx = 0
-            
             if current_board_index > last_active_board_idx:
                 # We just advanced to a new board!
                 # We need to sync its history
@@ -873,7 +1033,8 @@ async def play_single_mode(page, mode_name):
         # 3-STRIKE RULE: specific optimization for Sequence Mode Board 1
         # If we are on Board 1 (idx 0) and we have made 3 or more guesses (i-start_guess >= 3), 
         # and it's still not solved, force a fallback cheat.
-        if is_sequence and active_board_idx == 0 and (i - start_guess) >= 3:
+        # (Skipped when guided answers are driving — the guarantee wins quickly.)
+        if is_sequence and active_board_idx == 0 and (i - start_guess) >= 3 and not guided_ok:
             print(f"Sequence Board 1 Taking too long ({i - start_guess} guesses). Triggering 3-Strike Fallback...")
             potential_answers = await extract_answers_from_page(page)
             guessWord = fallback_solver(potential_answers)
@@ -883,6 +1044,26 @@ async def play_single_mode(page, mode_name):
             else:
                  print("3-Strike Rescue failed to find word. Continuing normal solver.")
                  guessWord = findBestWord(active_board_idx=active_board_idx)
+        elif guided_ok and used:
+            # Guided path (after the first organic guess): pick the official
+            # answer for the first currently-unsolved board that we have not
+            # typed yet. In Sequence only the active board is fillable, and its
+            # official answer is the right pick there too (board order matches
+            # solve order). Greens boards deterministically -> win in a few.
+            guided_target = None
+            nxt = None
+            board_scan = [active_board_idx] if (is_sequence and active_board_idx is not None) else range(4)
+            for b_idx in board_scan:
+                if resultsList[b_idx] != ["C", "C", "C", "C", "C"] and guided[b_idx] not in used:
+                    nxt = guided[b_idx]
+                    guided_target = b_idx
+                    break
+            if nxt is None:
+                print(f"[{mode_name}] guided answers exhausted/ambiguous -> solver takes over")
+                guided_ok = False
+                guessWord = findBestWord(active_board_idx=active_board_idx)
+            else:
+                guessWord = nxt
         else:
             guessWord = findBestWord(active_board_idx=active_board_idx)
         
@@ -891,13 +1072,24 @@ async def play_single_mode(page, mode_name):
             print(f"{mode_name}: Standard solver stuck. Attempting fallback extraction...")
             potential_answers = await extract_answers_from_page(page)
             guessWord = fallback_solver(potential_answers)
-            
+
             if guessWord:
                 print(f"Fallback Strategy: Suggesting {guessWord}")
             else:
-                print(f"{mode_name}: No valid word found including fallback - ending mode")
-                numLosses += 1
-                break
+                # Robustness: a single transient empty candidate list should not
+                # instantly lose. Re-sync the visible board state from the DOM
+                # (latest submitted row on every board) and retry findBestWord
+                # once before recording a loss.
+                print(f"{mode_name}: Fallback empty. Re-syncing board state from DOM and retrying...")
+                await resync_results_from_dom(page)
+                guessWord = findBestWord(active_board_idx=active_board_idx)
+
+                if guessWord:
+                    print(f"Recovery after re-sync: Suggesting {guessWord}")
+                else:
+                    print(f"{mode_name}: No valid word found including fallback - ending mode")
+                    numLosses += 1
+                    break
         
         setLettersAsUsed(guessWord)
         
@@ -915,31 +1107,22 @@ async def play_single_mode(page, mode_name):
         await page.keyboard.press("Enter")
         await asyncio.sleep(3)
         
-        # Check if game ended after this guess
-        if await check_game_over(page):
-            # Check if we won (all boards green)
-            if resultsList == [["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"]]:
-                winsList.append(i+1)
-                print(f"{mode_name}: WIN in {i+1} guesses!")
-                
-                print("Extracting solved words for victory screen...")
-                final_words = await get_solved_words(page)
-                # If extraction failed for some reason, fallback
-                if not final_words or "UNKNOWN" in final_words:
-                    # fallback to previous logic or just show what we have
-                    pass
-                
-                await show_victory_screen(page, mode_name, final_words) 
-            else:
-                numLosses += 1
-                print(f"{mode_name}: LOSS (So close!)")
-            break
-        
+        # Read the revealed feedback for this guess, then prune candidates.
         iteration += 1
         await changeResultsListAsync(page, active_board_idx=active_board_idx)
         removeWords()
+        used.add((guessWord or "").upper())
         
-        # Check for win via internal state
+        # Drift check: a guided guess MUST green its targeted board. If it did
+        # not (site data out of sync with the live board), hand control back to
+        # the organic solver for the rest of this mode.
+        if guided_ok and guided_target is not None:
+            if resultsList[guided_target] != ["C", "C", "C", "C", "C"]:
+                print(f"[{mode_name}] guided drift on board {guided_target + 1} -> solver takes over")
+                guided_ok = False
+            guided_target = None
+        
+        # Check for win via internal state (all four boards green)
         if resultsList == [["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"]]:
             winsList.append(i+1)
             print(f"{mode_name}: WIN in {i+1} guesses!")
@@ -947,11 +1130,55 @@ async def play_single_mode(page, mode_name):
             final_words = await get_solved_words(page)
             await show_victory_screen(page, mode_name, final_words)
             break
+        
+        # Check if game ended after this guess without a win -> loss
+        if await check_game_over(page):
+            numLosses += 1
+            print(f"{mode_name}: LOSS (So close!)")
+            break
     
     await asyncio.sleep(2)
 
 
-async def play_mode_in_existing_context(page, mode, mode_idx):
+async def enter_mode(page, mode):
+    """Navigate to a mode and wait until the board mounts. Returns bool."""
+    mode_name = mode["name"]
+    if mode_name == "Classic":
+        # Daily classic has no direct route: use the menu Play anchor.
+        try:
+            await page.goto("https://www.merriam-webster.com/games/quordle/#/", wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"Navigation warning for {mode_name}: {e}")
+        await asyncio.sleep(6)
+        try:
+            await page.evaluate("() => { Array.from(document.querySelectorAll('a')).filter(a => a.innerText.trim() === 'Play')[0].click(); }")
+        except Exception:
+            pass  # click navigates -> context destroyed is expected
+        if not await wait_for_game(page, timeout_s=20):
+            print(f"{mode_name}: classic board never mounted, skipping")
+            return False
+        await dismiss_welcome(page)
+        await dismiss_popups(page)
+        if not await probe_live(page, timeout_s=30):
+            print(f"{mode_name}: board not accepting input, skipping mode")
+            return False
+        return True
+    try:
+        await page.goto(mode["url"], wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        print(f"Navigation warning for {mode_name}: {e}")
+    if not await wait_for_game(page, timeout_s=45):
+        print(f"Timeout waiting for game board in {mode_name}")
+        return False
+    await dismiss_welcome(page)
+    await dismiss_popups(page)
+    if not await probe_live(page, timeout_s=60):
+        print(f"{mode_name}: board not accepting input, skipping mode")
+        return False
+    return True
+
+
+async def play_mode_in_existing_context(page, mode, mode_idx, official_map=None):
     """Play a mode using the existing page/context (preserves cookies)."""
     mode_name = mode["name"]
     mode_url = mode["url"]
@@ -961,30 +1188,26 @@ async def play_mode_in_existing_context(page, mode, mode_idx):
     print(f"# URL: {mode_url}")
     print(f"{'#'*60}\n")
     
-    # Navigate to mode
-    try:
-        await page.goto(mode_url, wait_until="domcontentloaded", timeout=60000)
-    except Exception as e:
-        print(f"Navigation warning for {mode_name}: {e}")
+    # Navigate to the mode and wait until the board is mounted + accepting
+    # input. Skip gracefully instead of hanging when it never mounts.
+    if not await enter_mode(page, mode):
+        print(f"{mode_name}: skipped (board unavailable)")
+        return
     
-    # Wait for game board
-    try:
-        await page.wait_for_selector('//*[@id="game-board-row-1"]', timeout=30000)
-    except:
-        print(f"Timeout waiting for game board in {mode_name}")
-    
-    # Wait for page to fully load
+    # Wait for page to fully settle
     await asyncio.sleep(2)
     
-    # Dismiss any popups
+    # Dismiss any residual popups
+    await dismiss_welcome(page)
     await dismiss_popups(page)
     await asyncio.sleep(1)
     
     # Show transition screen
     await show_transition_screen(page, mode_name)
     
-    # Play the mode
-    await play_single_mode(page, mode_name)
+    # Play the mode (guided by official answers when available for this mode)
+    official = (official_map or {}).get(mode_name)
+    await play_single_mode(page, mode_name, official=official)
 
 
 async def main():
@@ -996,6 +1219,15 @@ async def main():
     video_dir.mkdir(exist_ok=True)
     
     mode_videos = []
+    
+    # Official daily answers (Wordle-style guarantee). Fetched once, synchronously,
+    # before the browser loop. On failure this returns (None, {}) and every mode
+    # falls back to the pure blind solver — the run continues either way.
+    try:
+        official_date, official_map = await asyncio.to_thread(fetch_official_quordle)
+    except Exception as e:
+        print(f"[official] unavailable, pure solver: {e}")
+        official_date, official_map = None, {}
     
     async with async_playwright() as p:
         print(f"Starting browser (headless={HEADLESS})...")
@@ -1016,7 +1248,7 @@ async def main():
         
         # Play each mode in order
         for mode_idx, mode in enumerate(GAME_MODES):
-            await play_mode_in_existing_context(page, mode, mode_idx)
+            await play_mode_in_existing_context(page, mode, mode_idx, official_map)
             # Note: We are recording one GIANT video now, not separate ones.
             # OR we can try to split them?
             # Playwright video recording is per-page.
@@ -1049,8 +1281,12 @@ async def main():
     # Upload to YouTube
     if YOUTUBE_AVAILABLE and final_video_path:
         today = datetime.now().strftime("%B %d, %Y")
-        title = f"Quordle answer for{today} - Quordle answer today"
-        video_id = upload_to_youtube(str(final_video_path), title=title)
+        title = f"Quordle Answer Today - {today} (All Modes Solved) #Quordle"
+        # Pass official answers so the uploader builds an SEO description with
+        # per-mode answers + AI word meanings (gemini proxy).
+        video_id = upload_to_youtube(
+            str(final_video_path), title=title, official_map=official_map
+        )
         
         if video_id:
             # Trigger repository update

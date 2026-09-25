@@ -24,6 +24,124 @@ except ImportError:
 
 SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
 
+# Broader scopes enable thumbnail set + playlists when the token allows it.
+SCOPES_FULL = [
+    'https://www.googleapis.com/auth/youtube.upload',
+    'https://www.googleapis.com/auth/youtube',
+]
+
+import requests as _rq
+
+GEMINI_PROXY_URL = "https://gemini-web-proxy.shonratt.workers.dev/v1/chat/completions"
+GEMINI_PROXY_MODEL = "gemini-3.6-flash"
+
+
+def _gemini_chat(prompt, timeout=30):
+    try:
+        r = _rq.post(GEMINI_PROXY_URL,
+                     json={"model": GEMINI_PROXY_MODEL,
+                           "messages": [{"role": "user", "content": prompt}]},
+                     headers={"Content-Type": "application/json"}, timeout=timeout)
+        r.raise_for_status()
+        return (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+    except Exception as e:
+        print(f"[gemini] request failed: {e}")
+        return ""
+
+
+def fetch_word_meanings(words, timeout=40):
+    """Return {WORD: 'one-line meaning'} for a list of words via one AI call.
+
+    Batches all words into a single prompt for speed. Returns {} on failure.
+    """
+    import json as _json
+    words = [w.strip().upper() for w in words if w and len(w.strip()) == 5]
+    words = list(dict.fromkeys(words))  # dedupe, keep order
+    if not words:
+        return {}
+    prompt = (
+        "Return ONLY minified JSON: an object mapping each WORD to one short "
+        "family-friendly definition sentence. No prose, no code fences. "
+        "Words: " + ", ".join(words)
+    )
+    content = _gemini_chat(prompt)
+    if not content:
+        return {}
+    t = content.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        obj = _json.loads(t[start:end + 1])
+    except Exception:
+        return {}
+    out = {}
+    for k, v in obj.items():
+        ku = str(k).strip().upper()
+        if len(ku) == 5:
+            out[ku] = str(v).strip()
+    return out
+
+
+MODE_ORDER = ["Classic", "Chill", "Extreme", "Sequence", "Rescue", "Weekly"]
+
+
+def build_quordle_description(today, official_map=None, chapters=None, meanings=None):
+    """SEO-rich description: per-mode answers + word meanings + chapters."""
+    official_map = official_map or {}
+    meanings = meanings or {}
+    lines = []
+    lines.append(f"Today's Quordle answers for {today} - all modes solved! "
+                 f"Watch the full solve for Classic, Chill, Extreme, Sequence, "
+                 f"Rescue and Weekly modes.")
+    lines.append("")
+    lines.append("Quordle answer today: https://wordsolverx.com/quordle-answer-today")
+    lines.append("Quordle solver: https://wordsolverx.com/quordle-solver")
+    lines.append("")
+
+    # Chapters (YouTube auto-links these when the first is 0:00)
+    if chapters:
+        lines.append("CHAPTERS:")
+        for sec, label in chapters:
+            m, s = divmod(int(sec), 60)
+            lines.append(f"{m}:{s:02d} {label}")
+        lines.append("")
+
+    # Per-mode answers + AI meanings
+    any_ans = False
+    for mode in MODE_ORDER:
+        words = official_map.get(mode)
+        if not words:
+            continue
+        any_ans = True
+        lines.append(f"{mode.upper()} ANSWERS: {', '.join(words)}")
+        for w in words:
+            mean = meanings.get(w.upper())
+            if mean:
+                lines.append(f"   - {w.upper()}: {mean}")
+        lines.append("")
+    if not any_ans:
+        lines.append("Full solve for every Quordle mode. Subscribe for daily answers!")
+        lines.append("")
+
+    lines.append("#Quordle #Wordle #DailyPuzzle #BrainTeaser #WordGame #Shorts "
+                 "#PuzzleSolver #WordChallenge #QuordleAnswerToday")
+    lines.append("")
+    lines.append("quordle answer today, quordle solver, quordle answers, how to play "
+                 "quordle today, quordle classic answer today, quordle chill answer today, "
+                 "quordle extreme answer today, quordle sequence answer today, "
+                 "quordle rescue answer today, quordle weekly answer, best starting word "
+                 "for quordle, quordle hints")
+    lines.append("")
+    lines.append("Quordle is a word game where you solve four 5-letter puzzles at once. "
+                 "Subscribe for daily solutions!")
+    return "\n".join(lines)
+
+
 def get_credentials():
     """
     Get YouTube API credentials from:
@@ -92,7 +210,7 @@ def get_credentials():
     
     return creds
 
-def upload_to_youtube(video_path: str, title: str = None, description: str = None):
+def upload_to_youtube(video_path: str, title: str = None, description: str = None, official_map=None, chapters=None, thumbnail_path: str = None):
     """
     Upload a video to YouTube.
     Returns video ID if successful, None otherwise.
@@ -110,21 +228,19 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
         if not title:
             title = f"Quordle answer for{today} - Quordle answer today #Quordle"
         
-        # Proper SEO Description
+        # SEO description: per-mode answers + AI word meanings + chapters.
         if not description:
-            description = f"""Daily Quordle solve for {today}! Watch the full solution for today's puzzle. 
-
-            Quordle answer today: https://wordsolverx.com/quordle-answer-today
-
-            Quordle solver: https://wordsolverx.com/quordle-solver
-
-
-
-#Quordle #Wordle #DailyPuzzle #BrainTeaser #WordGame #Shorts #PuzzleSolver #WordChallenge
-
-Quordle answer today , quordle solver, quordle answers, how to play quordle today, quordle classic answer today, quordle chill answer today ,quordle exteme answer today, quordle sequence answer today, quordle resque answer today, quordle weekly answer , best starting word for quordle, quordle
-
-Quordle is a word game where you solve four 5-letter puzzles at once. Subscribe for daily solutions!"""
+            meanings = {}
+            if official_map:
+                all_words = []
+                for _mwords in official_map.values():
+                    all_words.extend(_mwords or [])
+                try:
+                    meanings = fetch_word_meanings(all_words)
+                    print(f"[wordinfo] fetched {len(meanings)} meanings via gemini-proxy")
+                except Exception as _e:
+                    print(f"[wordinfo] meanings fetch failed: {_e}")
+            description = build_quordle_description(today, official_map, chapters, meanings)
         
         body = {
             'snippet': {
@@ -162,6 +278,18 @@ Quordle is a word game where you solve four 5-letter puzzles at once. Subscribe 
         video_id = response.get('id')
         print(f"Upload successful! Video ID: {video_id}")
         print(f"URL: https://www.youtube.com/watch?v={video_id}")
+        # Best-effort custom thumbnail (needs youtube scope; ignore on failure)
+        if thumbnail_path and video_id:
+            try:
+                import os as _os
+                if _os.path.exists(thumbnail_path):
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=MediaFileUpload(thumbnail_path)
+                    ).execute()
+                    print(f"[thumbnail] set custom thumbnail: {thumbnail_path}")
+            except Exception as _te:
+                print(f"[thumbnail] set failed (scope?): {_te}")
         return video_id
         
     except Exception as e:
