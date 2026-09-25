@@ -170,21 +170,45 @@ def get_credentials():
                 creds = None
         
         if not creds:
-            # Try environment variable first (for CI)
+            # PREFERRED (same as the Wordle repo -> SAME YouTube channel):
+            # three separate secrets. Whatever channel the refresh token was
+            # minted on is the channel the video lands on, so reusing the
+            # Wordle repo's YOUTUBE_CLIENT_ID / _SECRET / _REFRESH_TOKEN
+            # guarantees Wordle and Quordle upload to the SAME channel.
+            rid = os.environ.get('YOUTUBE_CLIENT_ID', '').strip()
+            rsecret = os.environ.get('YOUTUBE_CLIENT_SECRET', '').strip()
+            rtok = os.environ.get('YOUTUBE_REFRESH_TOKEN', '').strip()
+            if rid and rtok and rsecret and not rsecret.lstrip().startswith('{'):
+                try:
+                    creds = Credentials.from_authorized_user_info({
+                        'client_id': rid,
+                        'client_secret': rsecret,
+                        'refresh_token': rtok,
+                        'token_uri': 'https://oauth2.googleapis.com/token',
+                        'scopes': SCOPES,
+                    }, SCOPES)
+                    if creds and creds.expired and creds.refresh_token:
+                        creds.refresh(Request())
+                    print("[youtube] Using 3-part refresh-token creds (same channel as Wordle).")
+                except Exception as e:
+                    print(f"[youtube] 3-part cred build failed: {e}")
+                    creds = None
+
+            # FALLBACK: single full-OAuth-JSON in YOUTUBE_CLIENT_SECRET (legacy).
             client_secret_env = os.environ.get('YOUTUBE_CLIENT_SECRET')
-            if client_secret_env:
+            if not creds and client_secret_env and client_secret_env.lstrip().startswith('{'):
                 try:
                     client_config = json.loads(client_secret_env)
-                    # For CI, we expect the full OAuth token, not just client secret
-                    if 'token' in client_config:
+                    if 'token' in client_config or 'refresh_token' in client_config:
                         creds = Credentials.from_authorized_user_info(client_config, SCOPES)
                     else:
-                        print("YOUTUBE_CLIENT_SECRET should contain full OAuth token for CI.")
+                        print("YOUTUBE_CLIENT_SECRET JSON lacks token/refresh_token.")
                         return None
                 except json.JSONDecodeError:
                     print("Invalid JSON in YOUTUBE_CLIENT_SECRET")
                     return None
-            else:
+
+            if not creds:
                 # Try local client_secret.json or client-secret.json
                 client_secret_path = Path(__file__).parent / 'client-secret.json'
                 if not client_secret_path.exists():
