@@ -2,8 +2,8 @@ name: Daily Quordle Video
 
 on:
   schedule:
-    # 18:45 UTC = 00:15 IST — 15 minutes after the Wordle trigger (18:30 UTC)
-    - cron: '45 18 * * *'
+    # 15:30 UTC = 9:00 PM IST (same time as Wordle; before frontend answer publish)
+    - cron: '30 15 * * *'
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -32,6 +32,9 @@ jobs:
       - name: Run Quordle Solver
         env:
           HEADLESS: 'true'
+          # Japan TZ (UTC+9): evening-IST run targets the NEXT day's board.
+          TZ_OFFSET_MINUTES: '540'
+          BROWSER_TZ: 'Asia/Tokyo'
           # SAME channel as Wordle: use the exact same 3 secrets the Wordle
           # repo uses. Whatever channel the refresh token was minted on is the
           # channel the video uploads to, so these must match the Wordle repo.

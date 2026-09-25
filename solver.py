@@ -9,6 +9,8 @@ import re
 import json
 import requests
 import wordListsMethods
+import quordle_answers_local
+from quordle_thumbnail import generate_quordle_thumbnail
 
 # Import YouTube upload (optional - graceful if missing)
 try:
@@ -895,15 +897,58 @@ def resolve_devalue(data):
     return _res(data)
 
 
-def fetch_official_quordle():
-    """Official daily answers from our own site (same data the pages show).
+def _target_quordle_date():
+    """Calendar date the browser will be playing, from TZ_OFFSET_MINUTES.
 
-    Returns (dateKey, {modeName: [4 words]}). Cached per process. On any
-    failure returns (None, {}) so the solver still runs (pure-solver fallback).
-    Practice has no official answers (random boards) -> omitted.
+    Mirrors the Playwright context timezone (BROWSER_TZ, default Asia/Tokyo):
+    production uses 540 (UTC+9) so an evening-IST run targets the NEXT day.
+    """
+    from datetime import timedelta as _td
+    try:
+        off = int(os.environ.get("TZ_OFFSET_MINUTES", "540"))
+    except ValueError:
+        off = 540
+    return datetime.utcnow() + _td(minutes=off)
+
+
+def fetch_official_quordle():
+    """Daily answers for the date the browser will play.
+
+    PRIMARY: local deterministic generator (bit-exact port of our frontend's
+    quordle.ts) -- works for ANY date incl. tomorrow, no network.
+    CROSS-CHECK: frontend __data.json (today only); logs drift, never wins.
+    Returns (dateKey, {modeName: [4 words]}). On total failure returns
+    (None, {}) so the solver still runs (pure-solver fallback).
     """
     if "data" in _official_cache:
         return _official_cache["data"]
+    try:
+        target = _target_quordle_date()
+        date_key = target.strftime("%Y-%m-%d")
+        out = quordle_answers_local.get_quordle_for_date(target)
+        out = {m: [w.upper() for w in ws] for m, ws in out.items()
+               if len(ws) == 4 and all(len(w) == 5 for w in ws)}
+        print(f"[official] LOCAL generator {date_key}: "
+              + ", ".join(f"{m}={','.join(w)}" for m, w in out.items()))
+        try:
+            fe_date, fe_map = _fetch_official_from_frontend()
+            if fe_date == date_key and fe_map:
+                diffs = [m for m in fe_map if fe_map.get(m) != out.get(m)]
+                if diffs:
+                    print(f"[official] WARN frontend differs on {diffs} -> trusting LOCAL")
+                else:
+                    print("[official] frontend cross-check OK")
+        except Exception:
+            pass
+        _official_cache["data"] = (date_key, out)
+        return date_key, out
+    except Exception as e:
+        print(f"[official] local generator failed ({e}); trying frontend")
+    return _fetch_official_from_frontend()
+
+
+def _fetch_official_from_frontend():
+    """Frontend __data.json answers (TODAY only) - cross-check/fallback."""
     try:
         r = requests.get(
             "https://wordsolverx.com/quordle-answer-today/__data.json",
@@ -931,14 +976,12 @@ def fetch_official_quordle():
             words = [str(w).upper() for w in (today_data.get(key) or [])]
             if len(words) == 4 and all(len(w) == 5 for w in words):
                 out[mode] = words
-        print(f"[official] {date_key}: " + ", ".join(f"{m}={','.join(w)}" for m, w in out.items()))
+        print(f"[official] FRONTEND {date_key}: " + ", ".join(f"{m}={','.join(w)}" for m, w in out.items()))
         _official_cache["data"] = (date_key, out)
         return date_key, out
     except Exception as e:
         print(f"[official] fetch failed (solver fallback): {e}")
         return None, {}
-
-
 async def play_single_mode(page, mode_name, official=None):
     """Play a single Quordle game mode.
 
@@ -1233,11 +1276,20 @@ async def main():
         print(f"Starting browser (headless={HEADLESS})...")
         browser = await p.chromium.launch(headless=HEADLESS)
         
-        # Create ONE persistent context for all modes
+        # Create ONE persistent context for all modes.
+        # BROWSER_TZ controls which calendar day the live MW Quordle board
+        # shows. Default Asia/Tokyo (UTC+9): run in the evening IST and the
+        # board is already on the NEXT day's puzzle. Local test can use
+        # Pacific/Kiritimati (UTC+14) to prove next-day generation.
+        _browser_tz = os.environ.get("BROWSER_TZ", "Asia/Tokyo")
+        print(f"[tz] Quordle browser timezone: {_browser_tz}")
         context = await browser.new_context(
             record_video_dir=str(video_dir),
             record_video_size={"width": 1280, "height": 720},
-            viewport={"width": 1280, "height": 720}
+            viewport={"width": 1280, "height": 720},
+            timezone_id=_browser_tz,
+            locale="en-US",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
         await context.route("**/*", block_ads)
         page = await context.new_page()
@@ -1280,12 +1332,27 @@ async def main():
     
     # Upload to YouTube
     if YOUTUBE_AVAILABLE and final_video_path:
-        today = datetime.now().strftime("%B %d, %Y")
+        # Title/thumbnail date must match the TARGET (browser) day, not the
+        # host clock, so an evening-IST run labels tomorrow's puzzle correctly.
+        try:
+            _tgt = _target_quordle_date()
+        except Exception:
+            _tgt = datetime.now()
+        today = _tgt.strftime("%B %d, %Y")
         title = f"Quordle Answer Today - {today} (All Modes Solved) #Quordle"
+        # Custom thumbnail (best-effort; upload proceeds even if it fails).
+        thumb_path = None
+        try:
+            tp = str(script_dir / f"thumbnail_quordle_{_tgt.strftime('%Y-%m-%d')}.png")
+            if generate_quordle_thumbnail(tp, today, official_map):
+                thumb_path = tp
+        except Exception as _te:
+            print(f"[thumbnail] generation skipped: {_te}")
         # Pass official answers so the uploader builds an SEO description with
-        # per-mode answers + AI word meanings (gemini proxy).
+        # per-mode answers + AI word meanings (gemini proxy) + set thumbnail.
         video_id = upload_to_youtube(
-            str(final_video_path), title=title, official_map=official_map
+            str(final_video_path), title=title,
+            official_map=official_map, thumbnail_path=thumb_path
         )
         
         if video_id:
