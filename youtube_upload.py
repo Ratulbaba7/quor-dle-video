@@ -87,17 +87,77 @@ def fetch_word_meanings(words, timeout=40):
     return out
 
 
+def fetch_word_analysis(words, timeout=45):
+    """Rich per-word analysis like Wordle's fetch_word_info_ai.
+
+    Returns {WORD: {part_of_speech, definition, example}} via one batched
+    AI call. Falls back to the simpler fetch_word_meanings on failure.
+    """
+    import json as _json
+    words = [w.strip().upper() for w in words if w and len(w.strip()) == 5]
+    words = list(dict.fromkeys(words))
+    if not words:
+        return {}
+    prompt = (
+        "Return ONLY minified JSON: an object mapping each WORD to an object "
+        "with keys part_of_speech, definition (one sentence), example (a short "
+        "family-friendly example sentence using the word). No prose, no code "
+        "fences. Words: " + ", ".join(words)
+    )
+    content = _gemini_chat(prompt, timeout=timeout)
+    if not content:
+        return {}
+    t = content.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        obj = _json.loads(t[start:end + 1])
+    except Exception:
+        return {}
+    out = {}
+    for k, v in obj.items():
+        ku = str(k).strip().upper()
+        if len(ku) == 5 and isinstance(v, dict):
+            out[ku] = {
+                "part_of_speech": str(v.get("part_of_speech", "")).strip(),
+                "definition": str(v.get("definition", "")).strip(),
+                "example": str(v.get("example", "")).strip(),
+            }
+    return out
+
+
 MODE_ORDER = ["Classic", "Chill", "Extreme", "Sequence", "Rescue", "Weekly"]
 
 
-def build_quordle_description(today, official_map=None, chapters=None, meanings=None):
-    """SEO-rich description: per-mode answers + word meanings + chapters."""
+def build_quordle_description(today, official_map=None, chapters=None,
+                            meanings=None, ytd_info=None, analysis=None):
+    """SEO-rich description matching Wordle-level quality.
+
+    Includes: keyword headline, real chapters, FAQ quick-answers block,
+    per-mode answers + AI definitions, yesterday recap / tomorrow teaser,
+    puzzle stats, and keyword-optimized hashtags.
+    """
     official_map = official_map or {}
     meanings = meanings or {}
+    ytd_info = ytd_info or {}
+    analysis = analysis or {}
     lines = []
-    lines.append(f"Today's Quordle answers for {today} - all modes solved! "
-                 f"Watch the full solve for Classic, Chill, Extreme, Sequence, "
-                 f"Rescue and Weekly modes.")
+
+    # Headline (exact match keyword first)
+    classic = official_map.get("Classic") or []
+    classic_str = ", ".join(classic) if classic else "watch to reveal"
+    lines.append("🎲 Quordle Answer Today — " + today + " | All 6 Modes Solved 🎲")
+    lines.append("")
+    lines.append(
+        f"Today's Quordle Classic answers: {classic_str}. "
+        "Watch the full solve for Classic, Chill, Extreme, Sequence, "
+        "Rescue and Weekly modes — every puzzle solved with hints!"
+    )
     lines.append("")
     lines.append("Quordle answer today: https://wordsolverx.com/quordle-answer-today")
     lines.append("Quordle solver: https://wordsolverx.com/quordle-solver")
@@ -105,42 +165,99 @@ def build_quordle_description(today, official_map=None, chapters=None, meanings=
 
     # Chapters (YouTube auto-links these when the first is 0:00)
     if chapters:
-        lines.append("CHAPTERS:")
+        lines.append("⏱️ CHAPTERS:")
         for sec, label in chapters:
             m, s = divmod(int(sec), 60)
             lines.append(f"{m}:{s:02d} {label}")
         lines.append("")
 
-    # Per-mode answers + AI meanings
+    # FAQ quick-answers block (captures long-tail voice queries)
+    faq = ["❓ What is today's Quordle answer? ➤ " +
+           (", ".join(classic) if classic else "Watch the video!")]
+    if ytd_info.get("yesterday"):
+        _y = ytd_info["yesterday"]
+        _yc = _y.get("classic") or []
+        if _yc:
+            faq.append("❓ What was yesterday's Quordle answer? ➤ " +
+                       ", ".join(_yc))
+    lines.append("💡 QUICK ANSWERS:")
+    lines.extend(faq)
+    lines.append("")
+
+    # Per-mode answers + AI definitions
     any_ans = False
     for mode in MODE_ORDER:
         words = official_map.get(mode)
         if not words:
             continue
         any_ans = True
-        lines.append(f"{mode.upper()} ANSWERS: {', '.join(words)}")
+        lines.append(f"🔓 {mode.upper()} ANSWERS: {', '.join(words)}")
         for w in words:
-            mean = meanings.get(w.upper())
-            if mean:
-                lines.append(f"   - {w.upper()}: {mean}")
+            wu = w.upper()
+            a = analysis.get(wu)
+            if a:
+                pos = a.get("part_of_speech", "")
+                defn = a.get("definition", "")
+                ex = a.get("example", "")
+                if defn:
+                    pos_s = f" ({pos})" if pos else ""
+                    lines.append(f"   📖 {wu}{pos_s}: {defn}")
+                if ex:
+                    lines.append(f'      Example: "{ex}"')
+            else:
+                mean = meanings.get(wu)
+                if mean:
+                    lines.append(f"   📖 {wu}: {mean}")
         lines.append("")
+
     if not any_ans:
         lines.append("Full solve for every Quordle mode. Subscribe for daily answers!")
         lines.append("")
 
-    lines.append("#Quordle #Wordle #DailyPuzzle #BrainTeaser #WordGame #Shorts "
-                 "#PuzzleSolver #WordChallenge #QuordleAnswerToday")
+    # Yesterday recap + tomorrow teaser
+    if ytd_info.get("yesterday"):
+        _y = ytd_info["yesterday"]
+        _yc = _y.get("classic") or []
+        if _yc:
+            lines.append(f"📅 YESTERDAY'S QUORDLE: {', '.join(_yc)}")
+            lines.append("")
+    if ytd_info.get("tomorrow"):
+        _t = ytd_info["tomorrow"]
+        _tc = _t.get("classic") or []
+        if _tc:
+            _first = _tc[0] if _tc else "?"
+            lines.append(
+                f"🔮 TOMORROW'S QUORDLE: First Classic word starts "
+                f"with '{_first[0].upper()}'")
+            lines.append("")
+
+    # Stats
+    _mode_count = sum(1 for m in MODE_ORDER if official_map.get(m))
+    lines.append("📊 PUZZLE STATS:")
+    lines.append(f"   🗓️ Date: {today}")
+    lines.append(f"   🎮 Modes solved: {_mode_count}/6")
+    if classic:
+        lines.append(f"   ✅ Classic answers: {', '.join(classic)}")
+    lines.append("")
+
+    lines.append("🔔 Subscribe for a new Quordle answer every day — never lose your streak!")
+    lines.append("")
+    lines.append("🧠 Try our FREE Quordle Solver:")
+    lines.append("🔗 https://wordsolverx.com/quordle-solver")
+    lines.append("")
+    lines.append("#Quordle #QuordleAnswerToday #QuordleAnswer #Wordle #DailyPuzzle "
+                 "#BrainTeaser #WordGame #Shorts #PuzzleSolver #WordChallenge "
+                 "#QuordleHints #QuordleSolver")
     lines.append("")
     lines.append("quordle answer today, quordle solver, quordle answers, how to play "
                  "quordle today, quordle classic answer today, quordle chill answer today, "
                  "quordle extreme answer today, quordle sequence answer today, "
                  "quordle rescue answer today, quordle weekly answer, best starting word "
-                 "for quordle, quordle hints")
+                 "for quordle, quordle hints, quordle answers today")
     lines.append("")
     lines.append("Quordle is a word game where you solve four 5-letter puzzles at once. "
                  "Subscribe for daily solutions!")
     return "\n".join(lines)
-
 
 def get_credentials():
     """
@@ -234,7 +351,9 @@ def get_credentials():
     
     return creds
 
-def upload_to_youtube(video_path: str, title: str = None, description: str = None, official_map=None, chapters=None, thumbnail_path: str = None):
+def upload_to_youtube(video_path: str, title: str = None, description: str = None,
+                      official_map=None, chapters=None, thumbnail_path: str = None,
+                      ytd_info=None):
     """
     Upload a video to YouTube.
     Returns video ID if successful, None otherwise.
@@ -255,25 +374,39 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
         # SEO description: per-mode answers + AI word meanings + chapters.
         if not description:
             meanings = {}
+            analysis = {}
             if official_map:
                 all_words = []
                 for _mwords in official_map.values():
                     all_words.extend(_mwords or [])
                 try:
-                    meanings = fetch_word_meanings(all_words)
-                    print(f"[wordinfo] fetched {len(meanings)} meanings via gemini-proxy")
+                    analysis = fetch_word_analysis(all_words)
+                    print(f"[wordinfo] fetched {len(analysis)} rich analyses via gemini-proxy")
                 except Exception as _e:
-                    print(f"[wordinfo] meanings fetch failed: {_e}")
-            description = build_quordle_description(today, official_map, chapters, meanings)
+                    print(f"[wordinfo] analysis fetch failed: {_e}")
+                # Fallback: simple one-liners for anything the rich call missed
+                _missing = [w for w in all_words
+                            if w and len(w) == 5 and w.upper() not in analysis]
+                if _missing:
+                    try:
+                        meanings = fetch_word_meanings(_missing)
+                        print(f"[wordinfo] fallback meanings for {len(meanings)} words")
+                    except Exception as _e:
+                        print(f"[wordinfo] fallback meanings failed: {_e}")
+            description = build_quordle_description(
+                today, official_map, chapters, meanings, ytd_info, analysis)
         
         body = {
             'snippet': {
                 'title': title,
                 'description': description,
                 'tags': [
-                    'Quordle', 'Wordle', 'Daily Puzzle', 'Word Game', 
-                    'Brain Teaser', 'Puzzle Solution', 'Shorts', 
-                    'Daily Quordle', 'Today\'s Quordle'
+                    'Quordle', 'Quordle Answer Today', 'Quordle Answer',
+                    'Wordle', 'Daily Puzzle', 'Word Game',
+                    'Brain Teaser', 'Puzzle Solution', 'Shorts',
+                    'Daily Quordle', "Today's Quordle", 'Quordle Hints',
+                    'Quordle Solver', 'Quordle Classic', 'Quordle Chill',
+                    'Quordle Extreme', 'Quordle Sequence', 'Quordle Rescue',
                 ],
                 'categoryId': '20'  # Gaming
             },

@@ -1266,8 +1266,24 @@ async def main():
     # Official daily answers (Wordle-style guarantee). Fetched once, synchronously,
     # before the browser loop. On failure this returns (None, {}) and every mode
     # falls back to the pure blind solver — the run continues either way.
+    # Yesterday / tomorrow answers for the description recap + teaser.
+    ytd_info = {}
     try:
         official_date, official_map = await asyncio.to_thread(fetch_official_quordle)
+        if official_date:
+            from datetime import timedelta as _td
+            _y = (official_date - _td(days=1)).strftime("%Y-%m-%d")
+            _t = (official_date + _td(days=1)).strftime("%Y-%m-%d")
+            try:
+                y_map = quordle_answers_local.get_quordle_answers(_y)
+                ytd_info["yesterday"] = {"date": _y, "classic": y_map.get("Classic", [])}
+            except Exception:
+                pass
+            try:
+                t_map = quordle_answers_local.get_quordle_answers(_t)
+                ytd_info["tomorrow"] = {"date": _t, "classic": t_map.get("Classic", [])}
+            except Exception:
+                pass
     except Exception as e:
         print(f"[official] unavailable, pure solver: {e}")
         official_date, official_map = None, {}
@@ -1298,9 +1314,14 @@ async def main():
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         
-        # Play each mode in order
+        # Play each mode in order. Track wall-clock start of each mode so we
+        # can build REAL YouTube chapter timestamps from actual elapsed time.
+        mode_start_times = []
+        _t0 = time.time()
         for mode_idx, mode in enumerate(GAME_MODES):
+            mode_start_times.append(time.time() - _t0)
             await play_mode_in_existing_context(page, mode, mode_idx, official_map)
+        _total_elapsed = time.time() - _t0
             # Note: We are recording one GIANT video now, not separate ones.
             # OR we can try to split them?
             # Playwright video recording is per-page.
@@ -1339,7 +1360,24 @@ async def main():
         except Exception:
             _tgt = datetime.now()
         today = _tgt.strftime("%B %d, %Y")
-        title = f"Quordle Answer Today - {today} (All Modes Solved) #Quordle"
+        _date_short = _tgt.strftime("%b %d")
+        _day_num = _tgt.timetuple().tm_yday
+        _title_variants = [
+            f"Quordle Answer Today - {today} (All 6 Modes Solved!) #Quordle",
+            f"Quordle Answer Today ({_date_short}) - All Modes Solved #Quordle",
+            f"Quordle Answers Today - {today} Classic/Chill/Extreme #Quordle",
+        ]
+        title = _title_variants[_day_num % len(_title_variants)]
+
+        # Build REAL chapters from per-mode start times.
+        _mode_names = [m["name"] for m in GAME_MODES]
+        chapters = []
+        for i, mn in enumerate(_mode_names):
+            sec = int(round(mode_start_times[i])) if i < len(mode_start_times) else 0
+            chapters.append((sec, f"{mn} Mode Solve"))
+        # Add a closing chapter for the results screen
+        chapters.append((int(round(_total_elapsed)), "All Modes Complete!"))
+        print(f"[chapters] {chapters}")
         # Custom thumbnail (best-effort; upload proceeds even if it fails).
         thumb_path = None
         try:
@@ -1352,7 +1390,8 @@ async def main():
         # per-mode answers + AI word meanings (gemini proxy) + set thumbnail.
         video_id = upload_to_youtube(
             str(final_video_path), title=title,
-            official_map=official_map, thumbnail_path=thumb_path
+            official_map=official_map, chapters=chapters,
+            thumbnail_path=thumb_path, ytd_info=ytd_info
         )
         
         if video_id:
