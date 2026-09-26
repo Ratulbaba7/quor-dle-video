@@ -271,19 +271,19 @@ def generate_quordle_facts_slide(out_path, date_str, classic_words):
 def generate_quordle_recap_image(out_path, ytd_info):
     if Image is None:
         return False
+    y = (ytd_info or {}).get("yesterday", {})
+    classic = y.get("classic") or []
+    if not classic:
+        # No yesterday data: skip the segment entirely (never render placeholders)
+        return False
     try:
         W, H = 1920, 1080
         img = Image.new("RGB", (W, H), BG_TOP)
         draw = ImageDraw.Draw(img)
         fonts = _load_fonts()
         draw.text((W // 2 - 400, 200), "YESTERDAY'S QUORDLE", fill=GREEN, font=fonts['title'])
-        y = (ytd_info or {}).get("yesterday", {})
-        classic = y.get("classic") or []
-        if classic:
-            draw.text((W // 2 - 300, 400), ", ".join(w.upper() for w in classic[:4]), fill=GREEN, font=fonts['tile'])
-            draw.text((W // 2 - 150, 600), str(y.get("date", "")), fill=TEXT, font=fonts['small'])
-        else:
-            draw.text((W // 2 - 150, 460), "(no data)", fill=TEXT, font=fonts['body'])
+        draw.text((W // 2 - 300, 400), ", ".join(w.upper() for w in classic[:4]), fill=GREEN, font=fonts['tile'])
+        draw.text((W // 2 - 150, 600), str(y.get("date", "")), fill=TEXT, font=fonts['small'])
         draw.text((W // 2 - 300, 800), "Did you keep your streak?", fill=YELLOW, font=fonts['body'])
         img.save(out_path, "PNG", optimize=True)
         return True
@@ -302,11 +302,11 @@ def generate_quordle_teaser_image(out_path, ytd_info):
         draw.text((W // 2 - 350, 200), "TOMORROW'S TEASER", fill=GREEN, font=fonts['title'])
         t = (ytd_info or {}).get("tomorrow", {})
         classic = t.get("classic") or []
-        if classic and classic[0]:
-            draw.text((W // 2 - 60, 450), classic[0][0].upper(), fill=GREEN, font=fonts['big'])
-            draw.text((W // 2 - 300, 650), "_ _ _ _ _  x4", fill=TEXT, font=fonts['tile'])
-        else:
-            draw.text((W // 2 - 150, 460), "(see you!)", fill=TEXT, font=fonts['body'])
+        if not (classic and classic[0]):
+            # No tomorrow data: skip the segment entirely (never render placeholders)
+            return False
+        draw.text((W // 2 - 60, 450), classic[0][0].upper(), fill=GREEN, font=fonts['big'])
+        draw.text((W // 2 - 300, 650), "_ _ _ _ _  x4", fill=TEXT, font=fonts['tile'])
         draw.text((W // 2 - 350, 820), "First letters revealed — subscribe!", fill=YELLOW, font=fonts['body'])
         img.save(out_path, "PNG", optimize=True)
         return True

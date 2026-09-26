@@ -1293,18 +1293,22 @@ async def main():
                 _od = datetime.strptime(official_date, "%Y-%m-%d")
             except Exception:
                 _od = _target_quordle_date()
-            _y = (_od - _td(days=1)).strftime("%Y-%m-%d")
-            _t = (_od + _td(days=1)).strftime("%Y-%m-%d")
+            _yd = _od - _td(days=1)
+            _tdt = _od + _td(days=1)
             try:
-                y_map = quordle_answers_local.get_quordle_answers(_y)
-                ytd_info["yesterday"] = {"date": _y, "classic": y_map.get("Classic", [])}
-            except Exception:
-                pass
+                y_map = quordle_answers_local.get_quordle_for_date(_yd)
+                ytd_info["yesterday"] = {"date": _yd.strftime("%Y-%m-%d"),
+                                         "classic": y_map.get("Classic", []) or []}
+            except Exception as _ye:
+                print(f"[ytd] yesterday lookup failed: {_ye}")
             try:
-                t_map = quordle_answers_local.get_quordle_answers(_t)
-                ytd_info["tomorrow"] = {"date": _t, "classic": t_map.get("Classic", [])}
-            except Exception:
-                pass
+                t_map = quordle_answers_local.get_quordle_for_date(_tdt)
+                ttd = t_map.get("Classic", []) or []
+                if ttd:
+                    ytd_info["tomorrow"] = {"date": _tdt.strftime("%Y-%m-%d"),
+                                            "classic": ttd}
+            except Exception as _te:
+                print(f"[ytd] tomorrow lookup failed: {_te}")
     except Exception as e:
         print(f"[official] unavailable, pure solver: {e}")
         official_date, official_map = None, {}
