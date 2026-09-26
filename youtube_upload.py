@@ -464,6 +464,12 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
                 'Quordle Solver', 'Quordle Classic', 'Quordle Chill',
                 'Quordle Extreme', 'Quordle Sequence', 'Quordle Rescue',
             ]
+        # YouTube snippet.description max is 5000 chars (400 invalidDescription)
+        if len(description) > 5000:
+            _orig = len(description)
+            _cut = description[:5000].rsplit("\n", 1)[0]
+            description = _cut if _cut else description[:5000]
+            print(f"[desc] capped {_orig} -> {len(description)} chars")
         body = {
             'snippet': {
                 'title': title,
