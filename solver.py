@@ -1441,6 +1441,16 @@ async def main():
     if final_video_path and MOVIEPY_AVAILABLE:
         try:
             gameplay = VideoFileClip(str(final_video_path))
+            # Recorded gameplay is 1280x720 with a pure-black site masthead on
+            # top. Crop it away, center on the board grid, then scale to exactly
+            # 1920x1080 -- full screen with no black bars and no stretching.
+            if (int(gameplay.w), int(gameplay.h)) == (1280, 720):
+                # y=142 is where the white page starts (above: black masthead +
+                # dark navbar). 1027x578 = exact 16:9, content-centred.
+                gameplay = gameplay.crop(x1=0, y1=142, x2=1027, y2=720)
+                gameplay = gameplay.resize((1920, 1080))
+            elif (int(gameplay.w), int(gameplay.h)) != (1920, 1080):
+                gameplay = gameplay.resize((1920, 1080))
             # Split gameplay proportionally into 6 mode chapters using wall-clock ratios
             _weights = []
             for i in range(len(GAME_MODES)):

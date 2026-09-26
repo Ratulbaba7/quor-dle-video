@@ -116,6 +116,41 @@ def _slide_base(kicker, meta_text):
     return img, draw, fonts, 200
 
 
+def _fit_font(font, txt, draw, max_w):
+    """Shrink a TrueType font until txt fits max_w (never crops text)."""
+    try:
+        f = font
+        for _ in range(24):
+            if draw.textlength(txt, font=f) <= max_w:
+                return f
+            ns = max(32, int(getattr(f, "size", 70) * 0.92) - 2)
+            if ns >= getattr(f, "size", 0):
+                break
+            f = ImageFont.truetype(f.path, ns)
+        return f
+    except Exception:
+        return font
+
+
+def _center_text(draw, y, txt, font, fill, max_w=1780):
+    """Center txt horizontally; shrink to fit max_w so it never leaves the frame."""
+    f = _fit_font(font, txt, draw, max_w)
+    try:
+        w = draw.textlength(txt, font=f)
+    except Exception:
+        w = 0
+    draw.text(((SLIDE_W - w) / 2, y), txt, fill=fill, font=f)
+    return f
+
+
+def _truncate_to_width(draw, txt, font, max_w):
+    """Cut txt with an ellipsis until it measures <= max_w."""
+    t = txt
+    while t and draw.textlength(t + "...", font=font) > max_w:
+        t = t[:-4].rstrip(" ,;:-")
+    return (t + "...") if t != txt else txt
+
+
 def generate_quordle_hints_image(out_path, date_str, classic_words):
     """4-column hints card: one 3-hint column per Classic answer."""
     if Image is None:
@@ -181,12 +216,13 @@ def generate_quordle_definition_slide(out_path, date_str, classic_words, analysi
             pos = a.get("part_of_speech", "") if isinstance(a, dict) else ""
             card_h = 150
             draw.rounded_rectangle([70, y, SLIDE_W - 70, y + card_h], radius=20, fill=CARD, outline=CARD_BORDER, width=2)
-            chip = (pos or "word").upper()[:12]
+            chip = _truncate_to_width(draw, (pos or "word").upper()[:16], fonts['bold'], 170)
             draw.rounded_rectangle([100, y + 24, 100 + 220, y + 82], radius=12, fill=GREEN)
             draw.text((132, y + 32), chip, fill=(10, 20, 14), font=fonts['bold'])
             draw.text((340, y + 32), wu, fill=TEXT, font=fonts['bold'])
             if defn:
-                draw.text((100, y + 92), defn[:90], fill=TEXT, font=fonts['regular'])
+                draw.text((100, y + 92), _truncate_to_width(draw, defn[:160], fonts['regular'], 1740),
+                          fill=TEXT, font=fonts['regular'])
             y += card_h + 20
         img.save(out_path, "PNG", optimize=True)
         return True
@@ -281,10 +317,10 @@ def generate_quordle_recap_image(out_path, ytd_info):
         img = Image.new("RGB", (W, H), BG_TOP)
         draw = ImageDraw.Draw(img)
         fonts = _load_fonts()
-        draw.text((W // 2 - 400, 200), "YESTERDAY'S QUORDLE", fill=GREEN, font=fonts['title'])
-        draw.text((W // 2 - 300, 400), ", ".join(w.upper() for w in classic[:4]), fill=GREEN, font=fonts['tile'])
-        draw.text((W // 2 - 150, 600), str(y.get("date", "")), fill=TEXT, font=fonts['small'])
-        draw.text((W // 2 - 300, 800), "Did you keep your streak?", fill=YELLOW, font=fonts['body'])
+        _center_text(draw, 200, "YESTERDAY'S QUORDLE", fonts['title'], GREEN, max_w=1780)
+        _center_text(draw, 400, ", ".join(w.upper() for w in classic[:4]), fonts['tile'], GREEN, max_w=1780)
+        _center_text(draw, 600, str(y.get("date", "")), fonts['small'], TEXT, max_w=1780)
+        _center_text(draw, 800, "Did you keep your streak?", fonts['body'], YELLOW, max_w=1780)
         img.save(out_path, "PNG", optimize=True)
         return True
     except Exception:
