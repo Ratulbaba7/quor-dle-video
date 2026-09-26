@@ -351,9 +351,62 @@ def get_credentials():
     
     return creds
 
+def youtube_find_or_create_playlist(youtube, title, description=""):
+    try:
+        r = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
+        for it in r.get("items", []):
+            if it["snippet"]["title"].strip().lower() == title.strip().lower():
+                return it["id"]
+        r = youtube.playlists().insert(part="snippet,status",
+            body={"snippet": {"title": title, "description": description},
+                  "status": {"privacyStatus": "public"}}).execute()
+        return r.get("id")
+    except Exception as e:
+        print(f"[playlist] find/create failed: {e}")
+        return None
+
+
+def youtube_add_to_playlist(youtube, playlist_id, video_id):
+    try:
+        youtube.playlistItems().insert(part="snippet",
+            body={"snippet": {"playlistId": playlist_id,
+                              "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
+        print(f"[playlist] added {video_id}")
+    except Exception as e:
+        print(f"[playlist] add failed: {e}")
+
+
+def youtube_pin_comment(youtube, video_id, text):
+    try:
+        t = youtube.commentThreads().insert(part="snippet",
+            body={"snippet": {"videoId": video_id,
+                              "topLevelComment": {"snippet": {"textOriginal": text}}}}).execute()
+        cid = t.get("id")
+        # pin not directly supported via API v3 for all; best-effort like
+        return cid
+    except Exception as e:
+        print(f"[comment] pin failed (scope?): {e}")
+        return None
+
+
+def youtube_upload_captions(youtube, video_id, srt_text):
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".srt", delete=False, encoding="utf-8") as f:
+            f.write(srt_text)
+            p = f.name
+        from googleapiclient.http import MediaFileUpload as _MFU
+        youtube.captions().insert(part="snippet",
+            body={"snippet": {"videoId": video_id, "language": "en", "name": "English"}},
+            media_body=_MFU(p)).execute()
+        print("[captions] uploaded")
+    except Exception as e:
+        print(f"[captions] failed (scope?): {e}")
+
+
 def upload_to_youtube(video_path: str, title: str = None, description: str = None,
                       official_map=None, chapters=None, thumbnail_path: str = None,
-                      ytd_info=None):
+                      ytd_info=None, tags=None):
     """
     Upload a video to YouTube.
     Returns video ID if successful, None otherwise.
@@ -369,7 +422,7 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
         # Generate title and description if not provided
         today = datetime.now().strftime("%B %d, %Y")
         if not title:
-            title = f"Quordle answer for{today} - Quordle answer today #Quordle"
+            title = f"Quordle Answer Today ({today}) - All 6 Modes Solved!"
         
         # SEO description: per-mode answers + AI word meanings + chapters.
         if not description:
@@ -396,18 +449,26 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
             description = build_quordle_description(
                 today, official_map, chapters, meanings, ytd_info, analysis)
         
+        try:
+            import quordle_parity as _QP
+            _ds = today.split(",")[0]
+            _dn = today.replace(",", "").split()[:2]
+            _date_num = "/".join(_dn) if len(_dn) == 2 else _ds
+            _tags = _QP.build_optimized_tags(_ds, _date_num)
+        except Exception:
+            _tags = [
+                'Quordle', 'Quordle Answer Today', 'Quordle Answer',
+                'Wordle', 'Daily Puzzle', 'Word Game',
+                'Brain Teaser', 'Puzzle Solution', 'Shorts',
+                'Daily Quordle', "Today's Quordle", 'Quordle Hints',
+                'Quordle Solver', 'Quordle Classic', 'Quordle Chill',
+                'Quordle Extreme', 'Quordle Sequence', 'Quordle Rescue',
+            ]
         body = {
             'snippet': {
                 'title': title,
                 'description': description,
-                'tags': [
-                    'Quordle', 'Quordle Answer Today', 'Quordle Answer',
-                    'Wordle', 'Daily Puzzle', 'Word Game',
-                    'Brain Teaser', 'Puzzle Solution', 'Shorts',
-                    'Daily Quordle', "Today's Quordle", 'Quordle Hints',
-                    'Quordle Solver', 'Quordle Classic', 'Quordle Chill',
-                    'Quordle Extreme', 'Quordle Sequence', 'Quordle Rescue',
-                ],
+                'tags': tags or _tags,
                 'categoryId': '20'  # Gaming
             },
             'status': {
@@ -447,6 +508,27 @@ def upload_to_youtube(video_path: str, title: str = None, description: str = Non
                     print(f"[thumbnail] set custom thumbnail: {thumbnail_path}")
             except Exception as _te:
                 print(f"[thumbnail] set failed (scope?): {_te}")
+        # Wordle-parity enrichment: playlist + pin + captions (best-effort)
+        try:
+            _pl = youtube_find_or_create_playlist(youtube, "Quordle Answer Today - Daily", "Daily Quordle answers - all modes solved")
+            if _pl:
+                youtube_add_to_playlist(youtube, _pl, video_id)
+        except Exception:
+            pass
+        try:
+            _classic = ((official_map or {}).get("Classic") or [])
+            _pin = "Today's Classic: " + (", ".join(_classic) if _classic else "watch to reveal") + " | Solver: https://wordsolverx.com/quordle-solver"
+            youtube_pin_comment(youtube, video_id, _pin)
+        except Exception:
+            pass
+        try:
+            if chapters:
+                import quordle_parity as _QP2
+                _srt = _QP2.build_captions_srt(chapters, chapters[-1][0] + 30 if chapters else 300, today)
+                if _srt:
+                    youtube_upload_captions(youtube, video_id, _srt)
+        except Exception:
+            pass
         return video_id
         
     except Exception as e:

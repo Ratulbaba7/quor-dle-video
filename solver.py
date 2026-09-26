@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
@@ -11,6 +12,7 @@ import requests
 import wordListsMethods
 import quordle_answers_local
 from quordle_thumbnail import generate_quordle_thumbnail
+import quordle_parity as QP
 
 # Import YouTube upload (optional - graceful if missing)
 try:
@@ -19,6 +21,14 @@ try:
 except ImportError:
     YOUTUBE_AVAILABLE = False
     print("YouTube upload module not available.")
+
+# moviepy optional (Wordle-style assembly); ffmpeg fallback otherwise
+try:
+    from moviepy.editor import VideoFileClip, ImageClip, concatenate_videoclips, AudioFileClip
+    import moviepy.audio.fx.all as afx
+    MOVIEPY_AVAILABLE = True
+except Exception:
+    MOVIEPY_AVAILABLE = False
 
 # Configuration
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
@@ -1005,6 +1015,7 @@ async def play_single_mode(page, mode_name, official=None):
     print(f"{'='*50}\n")
     
     reset_solver_state()
+    counted_boards = set()
     
     is_sequence = "Sequence" in mode_name
     
@@ -1155,6 +1166,13 @@ async def play_single_mode(page, mode_name, official=None):
         await changeResultsListAsync(page, active_board_idx=active_board_idx)
         removeWords()
         used.add((guessWord or "").upper())
+
+        # per-board win tracking (verify gate counts 4 boards x 6 modes = 24)
+        for bi in range(4):
+            if (bi not in counted_boards
+                    and resultsList[bi] == ["C", "C", "C", "C", "C"]):
+                counted_boards.add(bi)
+                winsList.append(bi + 1)
         
         # Drift check: a guided guess MUST green its targeted board. If it did
         # not (site data out of sync with the live board), hand control back to
@@ -1167,7 +1185,6 @@ async def play_single_mode(page, mode_name, official=None):
         
         # Check for win via internal state (all four boards green)
         if resultsList == [["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"], ["C", "C", "C", "C", "C"]]:
-            winsList.append(i+1)
             print(f"{mode_name}: WIN in {i+1} guesses!")
             
             final_words = await get_solved_words(page)
@@ -1272,8 +1289,12 @@ async def main():
         official_date, official_map = await asyncio.to_thread(fetch_official_quordle)
         if official_date:
             from datetime import timedelta as _td
-            _y = (official_date - _td(days=1)).strftime("%Y-%m-%d")
-            _t = (official_date + _td(days=1)).strftime("%Y-%m-%d")
+            try:
+                _od = datetime.strptime(official_date, "%Y-%m-%d")
+            except Exception:
+                _od = _target_quordle_date()
+            _y = (_od - _td(days=1)).strftime("%Y-%m-%d")
+            _t = (_od + _td(days=1)).strftime("%Y-%m-%d")
             try:
                 y_map = quordle_answers_local.get_quordle_answers(_y)
                 ytd_info["yesterday"] = {"date": _y, "classic": y_map.get("Classic", [])}
@@ -1308,6 +1329,24 @@ async def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
         await context.route("**/*", block_ads)
+        # Time-travel trick (like extension): fake JS Date to NEXT day so
+        # date-seeded boards serve tomorrow early. TZ already does most of
+        # it; FAKE_DATE_ISO forces it explicitly for local Kiribati tests.
+        try:
+            _fake_iso = os.environ.get("FAKE_DATE_ISO", "").strip()
+            if _fake_iso:
+                await context.add_init_script(script=QP.get_fake_date_init_script(_fake_iso))
+                print(f"[fakedate] JS Date frozen to {_fake_iso}")
+            else:
+                # Default: shift to target quordle date 00:05 local so boards roll
+                try:
+                    _tgt_iso = QP._target_iso_fallback() if hasattr(QP, "_target_iso_fallback") else None
+                except Exception:
+                    _tgt_iso = None
+                if _tgt_iso:
+                    await context.add_init_script(script=QP.get_fake_date_init_script(_tgt_iso))
+        except Exception as _fe:
+            print(f"[fakedate] skipped: {_fe}")
         page = await context.new_page()
         
         await page.set_extra_http_headers({
@@ -1343,40 +1382,140 @@ async def main():
     print(f"ALL MODES COMPLETED!")
     print(f"Total Wins: {len(winsList)} - Total Losses: {numLosses}")
     print(f"{'='*60}\n")
+
+    # verify gate: 4 boards x 6 modes = 24 wins, zero losses
+    _expected = 4 * len(GAME_MODES)
+    qw_solved = len(winsList) >= _expected and numLosses == 0
+    print(f"[verify] boards won {len(winsList)}/{_expected} losses={numLosses} solved={qw_solved}")
     
     # Rename/Process the single video file
     final_video_path = mode_videos[0] if mode_videos else None
-    
-    # Add background music
-    if final_video_path:
-        final_video_path = add_background_music(final_video_path, script_dir, video_dir)
-    
+
+    # --- Wordle-parity assembly: recap(5s)+hints(10s)+gameplay+3x analysis(8s)+teaser(5s)
+    # Target date for labels (browser day, not host clock)
+    try:
+        _tgt = _target_quordle_date()
+    except Exception:
+        _tgt = datetime.now()
+    today = _tgt.strftime("%B %d, %Y")
+    _date_short = _tgt.strftime("%b %d")
+    _day_num = _tgt.timetuple().tm_yday
+    _date_key = _tgt.strftime("%Y-%m-%d")
+    classic_words = (official_map or {}).get("Classic") or []
+    # Fetch rich analysis once for slides + description
+    _analysis = {}
+    try:
+        if YOUTUBE_AVAILABLE:
+            from youtube_upload import fetch_word_analysis as _fwa
+            _all = []
+            for _ws in (official_map or {}).values():
+                _all.extend(_ws or [])
+            _analysis = _fwa(_all) or {}
+    except Exception as _e:
+        print(f"[analysis] fetch skipped: {_e}")
+
+    tmp_imgs = []
+    def _mk(path, fn, *a):
+        try:
+            if fn(path, *a):
+                tmp_imgs.append(path)
+                return path
+        except Exception as e:
+            print(f"[segment] {fn.__name__} failed: {e}")
+        return None
+
+    # Build segment images (Pillow-only, best-effort)
+    recap_p = _mk(str(script_dir / f"recap_{_date_key}.png"), QP.generate_quordle_recap_image, ytd_info)
+    hints_p = _mk(str(script_dir / f"hints_{_date_key}.png"), QP.generate_quordle_hints_image, today, classic_words)
+    letter_freq = QP.get_letter_frequency_info(classic_words)
+    def_p = _mk(str(script_dir / f"analysis_def_{_date_key}.png"), QP.generate_quordle_definition_slide, today, classic_words, _analysis)
+    freq_p = _mk(str(script_dir / f"analysis_freq_{_date_key}.png"), QP.generate_quordle_frequency_slide, today, classic_words, letter_freq)
+    facts_p = _mk(str(script_dir / f"analysis_facts_{_date_key}.png"), QP.generate_quordle_facts_slide, today, classic_words)
+    teaser_p = _mk(str(script_dir / f"teaser_{_date_key}.png"), QP.generate_quordle_teaser_image, ytd_info)
+
+    chapters = []
+    if final_video_path and MOVIEPY_AVAILABLE:
+        try:
+            gameplay = VideoFileClip(str(final_video_path))
+            # Split gameplay proportionally into 6 mode chapters using wall-clock ratios
+            _weights = []
+            for i in range(len(GAME_MODES)):
+                s = mode_start_times[i] if i < len(mode_start_times) else 0
+                e = mode_start_times[i+1] if i+1 < len(mode_start_times) else _total_elapsed
+                _weights.append(max(1.0, e - s))
+            _tot_w = sum(_weights) or 1.0
+            _gd = float(gameplay.duration or 0)
+            parts, cursor = [], 0.0
+            def _img_clip(p, dur):
+                return ImageClip(p).set_duration(dur).set_fps(24).resize(width=1920, height=1080)
+            if recap_p:
+                chapters.append((cursor, "Yesterday's Quordle recap"))
+                c = _img_clip(recap_p, 5); parts.append(c); cursor += 5
+            if hints_p:
+                chapters.append((cursor, "Hints for all 4 words"))
+                c = _img_clip(hints_p, 10); parts.append(c); cursor += 10
+            # gameplay split
+            _off = 0.0
+            for i, m in enumerate(GAME_MODES):
+                frac = _weights[i] / _tot_w
+                dur = _gd * frac
+                if i == 0:
+                    chapters.append((cursor, f"{m['name']} Mode Solve"))
+                # sub-chapters inside gameplay: offset from cursor
+                if i > 0:
+                    chapters.append((cursor + _off, f"{m['name']} Mode Solve"))
+                _off += dur
+            parts.append(gameplay)
+            cursor += _gd
+            if def_p:
+                chapters.append((cursor, "Word analysis & definitions"))
+                c = _img_clip(def_p, 8); parts.append(c); cursor += 8
+            if freq_p:
+                chapters.append((cursor, "Letter frequency analysis"))
+                c = _img_clip(freq_p, 8); parts.append(c); cursor += 8
+            if facts_p:
+                chapters.append((cursor, "Word facts & solve path"))
+                c = _img_clip(facts_p, 8); parts.append(c); cursor += 8
+            if teaser_p:
+                chapters.append((cursor, "Tomorrow's teaser"))
+                c = _img_clip(teaser_p, 5); parts.append(c); cursor += 5
+            final_clip = concatenate_videoclips(parts, method="compose")
+            # ONE consistent music track over FULL video (Wordle parity)
+            try:
+                songs = [f for f in os.listdir(script_dir) if f.endswith('.mp3') and f.startswith('song')]
+                if songs:
+                    song_clip = AudioFileClip(str(script_dir / random.choice(songs)))
+                    if song_clip.duration < final_clip.duration:
+                        full_audio = afx.audio_loop(song_clip, duration=final_clip.duration)
+                    else:
+                        full_audio = song_clip.subclip(0, final_clip.duration)
+                    final_clip = final_clip.set_audio(full_audio)
+            except Exception as _ae:
+                print(f"[audio] uniform mix failed: {_ae}")
+            out_path = str(video_dir / f"quordle_final_{_date_key}.mp4")
+            final_clip.write_videofile(out_path, codec='libx264', audio_codec='aac', fps=24)
+            final_video_path = out_path
+            print(f"[assembly] Wordle-parity video: {out_path} chapters={chapters}")
+        except Exception as _e:
+            print(f"[assembly] moviepy failed, using raw + music: {_e}")
+            final_video_path = QP.apply_uniform_music_ffmpeg(str(final_video_path), script_dir)
+    elif final_video_path:
+        # ffmpeg fallback: uniform music only
+        final_video_path = QP.apply_uniform_music_ffmpeg(str(final_video_path), script_dir)
+
+    for _p in tmp_imgs:
+        pass  # keep for debugging; CI cleans workspace anyway
+
     # Upload to YouTube
     if YOUTUBE_AVAILABLE and final_video_path:
-        # Title/thumbnail date must match the TARGET (browser) day, not the
-        # host clock, so an evening-IST run labels tomorrow's puzzle correctly.
-        try:
-            _tgt = _target_quordle_date()
-        except Exception:
-            _tgt = datetime.now()
-        today = _tgt.strftime("%B %d, %Y")
-        _date_short = _tgt.strftime("%b %d")
-        _day_num = _tgt.timetuple().tm_yday
-        _title_variants = [
-            f"Quordle Answer Today - {today} (All 6 Modes Solved!) #Quordle",
-            f"Quordle Answer Today ({_date_short}) - All Modes Solved #Quordle",
-            f"Quordle Answers Today - {today} Classic/Chill/Extreme #Quordle",
-        ]
-        title = _title_variants[_day_num % len(_title_variants)]
-
-        # Build REAL chapters from per-mode start times.
-        _mode_names = [m["name"] for m in GAME_MODES]
-        chapters = []
-        for i, mn in enumerate(_mode_names):
-            sec = int(round(mode_start_times[i])) if i < len(mode_start_times) else 0
-            chapters.append((sec, f"{mn} Mode Solve"))
-        # Add a closing chapter for the results screen
-        chapters.append((int(round(_total_elapsed)), "All Modes Complete!"))
+        title = QP.build_optimized_title(_date_short, _day_num)
+        if not chapters:
+            # fallback: per-mode wall-clock chapters
+            _mode_names = [m["name"] for m in GAME_MODES]
+            for i, mn in enumerate(_mode_names):
+                sec = int(round(mode_start_times[i])) if i < len(mode_start_times) else 0
+                chapters.append((sec, f"{mn} Mode Solve"))
+            chapters.append((int(round(_total_elapsed)), "All Modes Complete!"))
         print(f"[chapters] {chapters}")
         # Custom thumbnail (best-effort; upload proceeds even if it fails).
         thumb_path = None
@@ -1426,7 +1565,18 @@ async def main():
     else:
         print("Skipping YouTube upload.")
     
-    print("Done!")
+    import json as _json
+    try:
+        _rk = _tgt.strftime("%Y-%m-%d")
+    except Exception:
+        _rk = datetime.now().strftime("%Y-%m-%d")
+    (video_dir / f"result_{_rk}.json").write_text(_json.dumps(
+        {"game": "quordle", "date": _rk, "solved": bool(qw_solved),
+         "wins": len(winsList), "expected": _expected, "losses": numLosses,
+         "video": str(final_video_path)}, indent=1))
+    print("Done!" if qw_solved else "NOT SOLVED — see result json")
+    import sys as _sys
+    _sys.exit(0 if qw_solved else 1)
 
 
 def concatenate_videos(video_paths, script_dir, video_dir):
