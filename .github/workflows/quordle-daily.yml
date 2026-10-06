@@ -1,9 +1,8 @@
 name: Daily Quordle Video
 
 on:
-  schedule:
-    # 15:30 UTC = 9:00 PM IST (same time as Wordle; before frontend answer publish)
-    - cron: '30 15 * * *'
+  # Triggered ONLY by Cloudflare worker (wordle-quordle-trigger, 30 15 * * *).
+  # Native schedule removed to prevent double-posting same video twice.
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
